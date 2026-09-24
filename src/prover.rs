@@ -85,7 +85,7 @@ impl Params {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::tests::sample_witness;
+    use crate::circuit::sample::sample_witness;
 
     #[test]
     fn prove_and_verify_roundtrip() {
