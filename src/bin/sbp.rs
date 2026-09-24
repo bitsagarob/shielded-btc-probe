@@ -88,6 +88,14 @@ enum Cmd {
     },
     /// Show replayed state.
     Status,
+    /// Publish arbitrary envelope bytes from a wallet's funding key. Used to
+    /// probe replay rules (double spends, stale anchors, malformed bytes).
+    PublishRaw {
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long)]
+        hex: String,
+    },
 }
 
 fn load_state(dir: &Path) -> Result<State> {
@@ -217,6 +225,16 @@ fn main() -> Result<()> {
             let payout = Payout { amount: *amount, script_pubkey: addr.script_pubkey().to_bytes() };
             let (txid, bytes, vsize, prove_s) = w.send(&mut e, &st, &params, &op, *amount, Some(payout))?;
             println!("redeem txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, proof {prove_s:.2}s");
+        }
+        Cmd::PublishRaw { wallet, hex } => {
+            let w = Wallet::open(wallet)?;
+            let mut e = Electrum::connect(&cli.electrum)?;
+            let payload = hex::decode(hex)?;
+            let utxos = w.funding_utxos(&mut e)?;
+            let tx = w.funding.build_carrier(&utxos, &payload, vec![])?;
+            let vsize = tx.vsize();
+            let txid = e.broadcast(&tx)?;
+            println!("published {} bytes in {txid}, {vsize} vB", payload.len());
         }
         Cmd::Payouts { wallet } => {
             let params = Params::load_or_setup(&cli.params)?;
