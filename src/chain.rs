@@ -46,9 +46,18 @@ impl Electrum {
         self.next_id += 1;
         let req = json!({"id": self.next_id, "method": method, "params": params});
         self.writer.write_all(format!("{req}\n").as_bytes())?;
-        let mut line = String::new();
-        self.reader.read_line(&mut line)?;
-        let v: Value = serde_json::from_str(&line).context("parsing Fulcrum reply")?;
+        // Fulcrum pushes headers.subscribe notifications on the same socket;
+        // skip anything that is not the reply to this id.
+        let v: Value = loop {
+            let mut line = String::new();
+            if self.reader.read_line(&mut line)? == 0 {
+                bail!("Fulcrum closed the connection");
+            }
+            let v: Value = serde_json::from_str(&line).context("parsing Fulcrum reply")?;
+            if v.get("id").and_then(|i| i.as_u64()) == Some(self.next_id) {
+                break v;
+            }
+        };
         if let Some(err) = v.get("error") {
             if !err.is_null() {
                 bail!("{method}: {err}");
