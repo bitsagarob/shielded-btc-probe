@@ -23,6 +23,17 @@ PROFILE.md lists every deviation from the paper.
 The indexer reads the chain through Fulcrum's Electrum protocol
 (`transaction.id_from_pos` enumerates each block), so it needs no node RPC.
 
+## Hardening pass
+
+A review against the paper after the first on-chain run found and fixed these.
+Dummy input slots now publish a real nullifier, Poseidon(sk_nf, rho(fresh r_seed), 0), and the indexer inserts it, so padding follows one fixed convention.
+Sender-side recovery now performs the paper's 16.2 leaf check and only records a sent note when one of the envelope's nullifiers is ours.
+The carrier parser now rejects, and logs, transactions with two OP_RETURN outputs or extra pushes when the payload starts with the magic, and requires parsed bytes to re-serialise to the published bytes.
+The operator now holds a separate vault key, deducts the payout transaction fee from the user's amount, refuses payouts below 546 sat or to a non-standard script, and tags each payout with the request's first nullifier so a restored operator wallet does not pay twice.
+DiversifyHash is bounded at 32 candidates; a diversifier with no curve point is not a valid address.
+`sbp unlock` clears the lock that a failed or unconfirmed send leaves on its input notes.
+PROFILE.md records the corrected witness list, the 64-bit value range, the wallet anchor policy and the attacks the public setup allows.
+
 ## Run it
 
 ```
