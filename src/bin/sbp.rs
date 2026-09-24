@@ -62,6 +62,13 @@ enum Cmd {
         #[arg(long)]
         wallet: PathBuf,
     },
+    /// Release notes locked by a carrier that was dropped or reorged out.
+    Unlock {
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long)]
+        txid: String,
+    },
     /// Shielded transfer.
     Send {
         #[arg(long)]
@@ -205,6 +212,11 @@ fn main() -> Result<()> {
             for s in &w.file.sent {
                 println!("  sent {:>10} sat in {} output {} to {}...", s.v, s.txid, s.j, &s.to[..20]);
             }
+        }
+        Cmd::Unlock { wallet, txid } => {
+            let mut w = Wallet::open(wallet)?;
+            let n = w.unlock(&txid.parse()?)?;
+            println!("unlocked {n} notes, balance {} sat", w.balance());
         }
         Cmd::Send { wallet, to, amount } => {
             let params = Params::load_or_setup(&cli.params)?;

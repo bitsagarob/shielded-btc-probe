@@ -5,15 +5,16 @@ use crate::chain::{Electrum, FundingKey, Utxo};
 use crate::circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness};
 use crate::envelope::{Envelope, MintEnvelope, Payout, TransferEnvelope, CT_OUT_LEN};
 use crate::indexer::{Event, State};
-use crate::keys::{self, Address, WalletKeys, DIVERSIFIER_LEN};
+use crate::keys::{self, Address, Derived, WalletKeys, DIVERSIFIER_LEN};
 use crate::note::{self, NotePlaintext};
 use crate::prover::Params;
 use crate::tree::MerklePath;
-use crate::{Fr, Fs, N_IN, N_OUT, TREE_DEPTH};
+use crate::{Fr, Fs, N_IN, N_OUT, TREE_DEPTH, WINDOW_W};
 use anyhow::{anyhow, ensure, Context, Result};
 use ark_ff::UniformRand;
 use bitcoin::{Amount, ScriptBuf, TxOut, Txid};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 
@@ -30,6 +31,9 @@ pub struct OwnedNote {
     pub spent: bool,
     /// Set while a spend is published but not yet replayed.
     pub locked_by: Option<Txid>,
+    /// Anchor of that spend; the lock lapses once the anchor window has passed.
+    #[serde(default)]
+    pub lock_anchor: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +54,9 @@ pub struct WalletFile {
     pub notes: Vec<OwnedNote>,
     pub sent: Vec<SentRecord>,
     pub scanned_events: usize,
+    /// Txid of the last scanned event; a mismatch means replay history changed.
+    #[serde(default)]
+    pub scanned_txid: Option<Txid>,
     pub paid_payouts: Vec<Txid>,
 }
 
@@ -79,6 +86,27 @@ fn random_hex() -> String {
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
     hex::encode(b)
 }
+fn event_txid(ev: &Event) -> Txid {
+    match ev {
+        Event::Mint(m) => m.txid,
+        Event::Transfer(t) => t.txid,
+    }
+}
+fn input_witness(n: &OwnedNote, path: MerklePath) -> Result<InputWitness> {
+    Ok(InputWitness {
+        enabled: true,
+        is_mint: n.is_mint,
+        v: n.v,
+        d: d_from_hex(&n.d)?,
+        r_seed: fr_from_hex(&n.r_seed)?,
+        h_body_create: fr_from_hex(&n.h_body_create)?,
+        j: n.j,
+        path,
+    })
+}
+fn own_nullifier(der: &Derived, n: &OwnedNote) -> Result<Fr> {
+    Ok(note::nullifier(&der.sk_nf, &note::rho(&fr_from_hex(&n.r_seed)?), n.pos))
+}
 
 impl Wallet {
     pub fn create(path: &Path) -> Result<Self> {
@@ -90,6 +118,7 @@ impl Wallet {
             notes: vec![],
             sent: vec![],
             scanned_events: 0,
+            scanned_txid: None,
             paid_payouts: vec![],
         };
         let w = Self::from_file(path.to_path_buf(), file)?;
@@ -142,13 +171,32 @@ impl Wallet {
     /// Paper 16.1 and 16.2 against the indexer's accepted history.
     pub fn scan(&mut self, state: &State) -> Result<usize> {
         let der = self.keys.derive();
+        let cursor = self.file.scanned_events;
+        if cursor > 0 && state.events.get(cursor - 1).map(event_txid) != self.file.scanned_txid {
+            eprintln!("replayed history changed under the wallet, rescanning from activation");
+            self.file.notes.clear();
+            self.file.sent.clear();
+            self.file.scanned_events = 0;
+        }
+        // Paper C.4: every local record must still describe the accepted leaf.
+        let mut kept = Vec::with_capacity(self.file.notes.len());
+        for n in self.file.notes.drain(..) {
+            let leaf = circuit::input_leaf(&der.sk_spend, &input_witness(&n, MerklePath { pos: n.pos, siblings: vec![] })?);
+            if state.tree.leaf(n.pos) == Some(leaf) {
+                kept.push(n);
+            } else {
+                eprintln!("dropping note at position {}: no longer matches the replayed leaf", n.pos);
+            }
+        }
+        self.file.notes = kept;
+        let mut nfs: HashSet<Fr> = self.file.notes.iter().map(|n| own_nullifier(&der, n)).collect::<Result<_>>()?;
         let mut found = 0;
         for ev in &state.events[self.file.scanned_events..] {
             match ev {
                 Event::Mint(m) => {
                     let env = m.envelope();
                     if keys::address_for(&der, env.d).pk_d == env.pk_d {
-                        self.file.notes.push(OwnedNote {
+                        let n = OwnedNote {
                             v: m.value,
                             d: hex::encode(env.d),
                             r_seed: fr_hex(&env.r_seed),
@@ -159,18 +207,23 @@ impl Wallet {
                             source_txid: m.txid,
                             spent: false,
                             locked_by: None,
-                        });
-                        found += 1;
+                            lock_anchor: None,
+                        };
+                        found += self.record(&der, &mut nfs, n)? as usize;
                     }
                 }
                 Event::Transfer(t) => {
                     let env = t.envelope();
                     let h_body = env.h_body();
                     for j in 0..N_OUT {
-                        let Some(n) = note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &der.sk_view) else { continue };
                         let leaf = note::leaf(&h_body, j as u8, &env.pk_eph[j], &env.ct[j]);
                         ensure!(state.tree.leaf(t.positions[j]) == Some(leaf), "replay leaf mismatch at {}", t.positions[j]);
-                        self.file.notes.push(OwnedNote {
+                    }
+                    for j in 0..N_OUT {
+                        let Some(n) = note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &der.sk_view) else { continue };
+                        // Output 0 of a transfer carrying a payout is the peg-out burn.
+                        let burned = j == 0 && env.payout.is_some();
+                        let n = OwnedNote {
                             v: n.v,
                             d: hex::encode(n.d),
                             r_seed: fr_hex(&n.r_seed),
@@ -179,14 +232,18 @@ impl Wallet {
                             j: j as u8,
                             pos: t.positions[j],
                             source_txid: t.txid,
-                            spent: false,
+                            spent: burned,
                             locked_by: None,
-                        });
-                        found += 1;
+                            lock_anchor: None,
+                        };
+                        found += self.record(&der, &mut nfs, n)? as usize;
                     }
-                    // Sender-side recovery of our own transfers.
+                    // Sender-side recovery, only for transfers that spend a note of ours.
+                    if !env.nf.iter().any(|nf| nfs.contains(nf)) {
+                        continue;
+                    }
                     if let Some(records) = note::decrypt_recovery(&env.ct_out, &env.recovery_binding(), &der.vk_out) {
-                        for (j, (pk_d, sk_eph)) in records.iter().enumerate() {
+                        for (j, (pk_d, sk_eph)) in records.iter().take(N_OUT).enumerate() {
                             if let Some(n) = note::decrypt_as_sender(&env.ct[j], &env.pk_eph[j], pk_d, sk_eph) {
                                 if self.file.sent.iter().all(|s| !(s.txid == t.txid && s.j == j as u8)) {
                                     let to = Address { d: n.d, pk_d: *pk_d }.encode();
@@ -199,16 +256,43 @@ impl Wallet {
             }
         }
         self.file.scanned_events = state.events.len();
-        // Spent status and lock release come from the nullifier set.
+        self.file.scanned_txid = state.events.last().map(event_txid);
+        // Spent status from the nullifier set; a lock whose anchor window has
+        // passed without the nullifier appearing can never be replayed.
         for n in &mut self.file.notes {
-            let nf = note::nullifier(&der.sk_nf, &note::rho(&fr_from_hex(&n.r_seed)?), n.pos);
-            if state.nullifiers.contains(&nf) {
+            if state.nullifiers.contains(&own_nullifier(&der, n)?) {
                 n.spent = true;
                 n.locked_by = None;
+                n.lock_anchor = None;
+            } else if n.lock_anchor.is_some_and(|a| state.replayed_height > a + WINDOW_W) {
+                n.locked_by = None;
+                n.lock_anchor = None;
             }
         }
         self.save()?;
         Ok(found)
+    }
+
+    /// Adds a scanned note unless it is empty or already recorded.
+    fn record(&mut self, der: &Derived, nfs: &mut HashSet<Fr>, n: OwnedNote) -> Result<bool> {
+        if n.v == 0 || self.file.notes.iter().any(|o| o.source_txid == n.source_txid && o.j == n.j) {
+            return Ok(false);
+        }
+        nfs.insert(own_nullifier(der, &n)?);
+        self.file.notes.push(n);
+        Ok(true)
+    }
+
+    /// Releases notes locked by a carrier that will never be replayed.
+    pub fn unlock(&mut self, txid: &Txid) -> Result<usize> {
+        let mut n = 0;
+        for note in self.file.notes.iter_mut().filter(|n| n.locked_by == Some(*txid)) {
+            note.locked_by = None;
+            note.lock_anchor = None;
+            n += 1;
+        }
+        self.save()?;
+        Ok(n)
     }
 
     pub fn funding_utxos(&self, e: &mut Electrum) -> Result<Vec<Utxo>> {
@@ -246,6 +330,7 @@ impl Wallet {
         amount: u64,
         payout: Option<Payout>,
     ) -> Result<(Txid, usize, usize, f64)> {
+        ensure!(amount > 0, "amount must be positive");
         let der = self.keys.derive();
         // Input selection: up to two unspent, unlocked notes.
         let mut candidates: Vec<usize> = (0..self.file.notes.len())
@@ -267,16 +352,7 @@ impl Wallet {
         for &i in &chosen {
             let n = &self.file.notes[i];
             let path = state.tree.path(n.pos).ok_or_else(|| anyhow!("note position {} not in tree", n.pos))?;
-            let inp = InputWitness {
-                enabled: true,
-                is_mint: n.is_mint,
-                v: n.v,
-                d: d_from_hex(&n.d)?,
-                r_seed: fr_from_hex(&n.r_seed)?,
-                h_body_create: fr_from_hex(&n.h_body_create)?,
-                j: n.j,
-                path,
-            };
+            let inp = input_witness(n, path)?;
             // Paper C.4: the local record must still describe the accepted leaf.
             ensure!(
                 state.tree.leaf(n.pos) == Some(circuit::input_leaf(&der.sk_spend, &inp)),
@@ -338,6 +414,7 @@ impl Wallet {
         let txid = e.broadcast(&tx)?;
         for &i in &chosen {
             self.file.notes[i].locked_by = Some(txid);
+            self.file.notes[i].lock_anchor = Some(h_anchor);
         }
         self.save()?;
         Ok((txid, payload.len(), vsize, prove_s))
