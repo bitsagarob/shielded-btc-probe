@@ -1,5 +1,9 @@
-//! Demonstrates why h_body must appear in a constraint: a Groth16 public
-//! input that no constraint touches does not bind the proof at all.
+//! Checks whether a Groth16 public input that no constraint touches binds
+//! the proof. In arkworks it does: the libsnark-style R1CS to QAP reduction
+//! adds one constraint per public input for exactly this reason. So h_body
+//! being "only" a public input is safe with this backend. Other backends may
+//! differ, which is why the transfer circuit hashes h_body into the digest
+//! rather than relying on the reduction.
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_groth16::Groth16;
@@ -41,8 +45,8 @@ fn run(constrain: bool) -> bool {
 }
 
 #[test]
-fn unconstrained_h_body_verifies_for_any_value() {
-    assert!(run(false), "proof made for h_body=1 verified for h_body=2 when h_body is unconstrained");
+fn unconstrained_h_body_is_still_bound_by_arkworks() {
+    assert!(!run(false), "arkworks adds input constraints in its QAP reduction, so this must not verify");
 }
 
 #[test]
