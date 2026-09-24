@@ -15,6 +15,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::{fmt, str::FromStr};
 
 pub const DIVERSIFIER_LEN: usize = 11;
 /// Scalars derived in-circuit are truncated to this many bits so they are
@@ -224,24 +225,35 @@ pub struct Address {
     pub pk_d: EdwardsAffine,
 }
 
-impl Address {
-    /// Textual form: "sbp1" + hex(d || pk_d).
-    pub fn encode(&self) -> String {
+/// Textual form: "sbp1" + hex(d || pk_d).
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut v = self.d.to_vec();
         v.extend_from_slice(&point_to_bytes(&self.pk_d));
-        format!("sbp1{}", hex::encode(v))
+        write!(f, "sbp1{}", hex::encode(v))
     }
-    pub fn decode(s: &str) -> Option<Self> {
-        let hexpart = s.strip_prefix("sbp1")?;
-        let v = hex::decode(hexpart).ok()?;
-        if v.len() != DIVERSIFIER_LEN + 32 {
-            return None;
-        }
-        let mut d = [0u8; DIVERSIFIER_LEN];
-        d.copy_from_slice(&v[..DIVERSIFIER_LEN]);
-        diversify_hash(&d)?;
-        let pk_d = point_from_bytes(&v[DIVERSIFIER_LEN..])?;
-        Some(Self { d, pk_d })
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error("not a shielded address: {0}")]
+pub struct ParseAddressError(String);
+
+impl FromStr for Address {
+    type Err = ParseAddressError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parse = || {
+            let v = hex::decode(s.strip_prefix("sbp1")?).ok()?;
+            if v.len() != DIVERSIFIER_LEN + 32 {
+                return None;
+            }
+            let mut d = [0u8; DIVERSIFIER_LEN];
+            d.copy_from_slice(&v[..DIVERSIFIER_LEN]);
+            diversify_hash(&d)?;
+            let pk_d = point_from_bytes(&v[DIVERSIFIER_LEN..])?;
+            Some(Self { d, pk_d })
+        };
+        parse().ok_or_else(|| ParseAddressError(s.to_owned()))
     }
 }
 
@@ -296,7 +308,7 @@ mod tests {
     fn address_roundtrip() {
         let w = WalletKeys::from_seed([7u8; 32]);
         let a = w.address(0);
-        assert_eq!(Address::decode(&a.encode()).unwrap(), a);
+        assert_eq!(a.to_string().parse::<Address>().unwrap(), a);
         assert_ne!(w.address(1).d, a.d);
     }
 

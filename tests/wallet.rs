@@ -23,7 +23,7 @@ fn fresh_state(op: &Wallet) -> State {
     State::fresh(Deployment {
         activation: 10,
         vault_script_pubkey: hex::encode(op.vault().script_pubkey().as_bytes()),
-        operator_address: op.address().encode(),
+        operator_address: op.address().to_string(),
         vk_fingerprint: "test".into(),
     })
 }
@@ -255,7 +255,7 @@ fn own_spend_is_recorded_as_sent() {
             alice.file.sent[0].v,
             alice.file.sent[0].to.as_str()
         ),
-        (txid, 600, to.encode().as_str())
+        (txid, 600, to.to_string().as_str())
     );
     alice.scan(&st).unwrap();
     assert_eq!(alice.file.sent.len(), 2);

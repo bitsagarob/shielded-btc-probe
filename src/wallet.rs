@@ -3,25 +3,91 @@
 
 use crate::{
     Fr, Fs, N_IN, N_OUT, TREE_DEPTH, WINDOW_W,
-    chain::{Electrum, FEE_RATE_SAT_VB, FundingKey, NETWORK, Utxo, op_return_payload},
+    chain::{self, Electrum, FEE_RATE_SAT_VB, FundingKey, NETWORK, Utxo, op_return_payload},
     circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness},
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, Payout, TransferEnvelope},
     indexer::{Event, State},
     keys::{self, Address, DIVERSIFIER_LEN, SpendingKeys, WalletKeys},
     note::{self, NotePlaintext},
-    prover::Params,
+    prover::{self, Params},
     tree::MerklePath,
 };
-use anyhow::{Context, Result, anyhow, ensure};
 use ark_ff::UniformRand;
-use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid};
+use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid, address::FromScriptError, secp256k1};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
     os::unix::fs::OpenOptionsExt,
-    path::Path,
+    path::{Path, PathBuf},
     time::Instant,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{} already exists", .0.display())]
+    Exists(PathBuf),
+    #[error("opening {}: {source}", path.display())]
+    Open {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Hex(#[from] hex::FromHexError),
+    #[error("bad seed")]
+    BadSeed,
+    #[error("bad key")]
+    BadKey,
+    #[error("bad field element")]
+    BadFieldElement,
+    #[error("bad diversifier")]
+    BadDiversifier,
+    #[error("funding key: {0}")]
+    FundingKey(secp256k1::Error),
+    #[error("vault key: {0}")]
+    VaultKey(secp256k1::Error),
+    #[error(transparent)]
+    Chain(#[from] chain::Error),
+    #[error(transparent)]
+    Prover(#[from] prover::Error),
+    #[error("replay leaf mismatch at {0}")]
+    LeafMismatch(u64),
+    #[error("amount must be positive")]
+    ZeroAmount,
+    #[error(
+        "insufficient shielded balance: {available} sat available, {needed} needed (two inputs max)"
+    )]
+    InsufficientBalance { available: u64, needed: u64 },
+    #[error("note position {0} not in tree")]
+    NotInTree(u64),
+    #[error("local note {0} does not match the replayed leaf")]
+    StaleNote(u64),
+    #[error("no root for {0}")]
+    NoRoot(u32),
+    #[error("indexer state is not at its own tip")]
+    StateNotAtTip,
+    #[error("arity")]
+    Arity,
+    #[error("nullifier already in the replayed set")]
+    NullifierReplayed,
+    #[error("ct_out length")]
+    CtOutLength,
+    #[error("own proof failed to verify")]
+    OwnProofInvalid,
+    #[error("asks {amount} sat but burned {burned} sat")]
+    PayoutExceedsBurn { amount: u64, burned: u64 },
+    #[error("{0} sat is below dust")]
+    PayoutBelowDust(u64),
+    #[error("non-standard payout script")]
+    NonStandardPayout,
+    #[error("payout script: {0}")]
+    PayoutScript(#[from] FromScriptError),
+    #[error("{amount} sat does not cover the {fee} sat fee plus dust")]
+    PayoutBelowFee { amount: u64, fee: u64 },
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnedNote {
@@ -70,7 +136,7 @@ pub struct WalletFile {
 }
 
 pub struct Wallet {
-    pub path: std::path::PathBuf,
+    pub path: PathBuf,
     pub file: WalletFile,
     pub keys: WalletKeys,
     pub funding: FundingKey,
@@ -80,20 +146,18 @@ pub struct Wallet {
 fn fr_hex(x: &Fr) -> String {
     hex::encode(keys::fr_to_bytes(x))
 }
-fn fr_from_hex(s: &str) -> Result<Fr> {
-    keys::fr_from_bytes(&hex::decode(s)?).ok_or_else(|| anyhow!("bad field element"))
+fn fr_from_hex(s: &str) -> Result<Fr, Error> {
+    keys::fr_from_bytes(&hex::decode(s)?).ok_or(Error::BadFieldElement)
 }
-fn d_from_hex(s: &str) -> Result<[u8; DIVERSIFIER_LEN]> {
+fn d_from_hex(s: &str) -> Result<[u8; DIVERSIFIER_LEN], Error> {
     let v = hex::decode(s)?;
-    v.as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("bad diversifier"))
+    v.as_slice().try_into().map_err(|_| Error::BadDiversifier)
 }
-fn key_from_hex(s: &str) -> Result<[u8; 32]> {
+fn key_from_hex(s: &str) -> Result<[u8; 32], Error> {
     hex::decode(s)?
         .as_slice()
         .try_into()
-        .map_err(|_| anyhow!("bad key"))
+        .map_err(|_| Error::BadKey)
 }
 fn random_hex() -> String {
     let mut b = [0u8; 32];
@@ -106,7 +170,7 @@ fn event_txid(ev: &Event) -> Txid {
         Event::Transfer(t) => t.txid,
     }
 }
-fn input_witness(n: &OwnedNote, path: MerklePath) -> Result<InputWitness> {
+fn input_witness(n: &OwnedNote, path: MerklePath) -> Result<InputWitness, Error> {
     Ok(InputWitness {
         enabled: true,
         is_mint: n.is_mint,
@@ -118,7 +182,7 @@ fn input_witness(n: &OwnedNote, path: MerklePath) -> Result<InputWitness> {
         path,
     })
 }
-fn own_nullifier(der: &SpendingKeys, n: &OwnedNote) -> Result<Fr> {
+fn own_nullifier(der: &SpendingKeys, n: &OwnedNote) -> Result<Fr, Error> {
     Ok(note::nullifier(
         &der.sk_nf,
         &note::rho(&fr_from_hex(&n.r_seed)?),
@@ -127,8 +191,10 @@ fn own_nullifier(der: &SpendingKeys, n: &OwnedNote) -> Result<Fr> {
 }
 
 impl Wallet {
-    pub fn create(path: &Path) -> Result<Self> {
-        ensure!(!path.exists(), "{} already exists", path.display());
+    pub fn create(path: &Path) -> Result<Self, Error> {
+        if path.exists() {
+            return Err(Error::Exists(path.to_path_buf()));
+        }
         let file = WalletFile {
             seed: random_hex(),
             funding_sk: random_hex(),
@@ -145,10 +211,12 @@ impl Wallet {
         Ok(w)
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
-        let mut file: WalletFile = serde_json::from_reader(
-            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?,
-        )?;
+    pub fn open(path: &Path) -> Result<Self, Error> {
+        let file = std::fs::File::open(path).map_err(|source| Error::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut file: WalletFile = serde_json::from_reader(file)?;
         let fill = file.vault_sk.is_empty();
         if fill {
             file.vault_sk = random_hex();
@@ -160,14 +228,15 @@ impl Wallet {
         Ok(w)
     }
 
-    fn from_file(path: std::path::PathBuf, file: WalletFile) -> Result<Self> {
+    fn from_file(path: PathBuf, file: WalletFile) -> Result<Self, Error> {
         let seed: [u8; 32] = hex::decode(&file.seed)?
             .as_slice()
             .try_into()
-            .map_err(|_| anyhow!("bad seed"))?;
+            .map_err(|_| Error::BadSeed)?;
         let funding =
-            FundingKey::from_bytes(&key_from_hex(&file.funding_sk).context("funding key")?)?;
-        let vault = FundingKey::from_bytes(&key_from_hex(&file.vault_sk).context("vault key")?)?;
+            FundingKey::from_bytes(&key_from_hex(&file.funding_sk)?).map_err(Error::FundingKey)?;
+        let vault =
+            FundingKey::from_bytes(&key_from_hex(&file.vault_sk)?).map_err(Error::VaultKey)?;
         Ok(Self {
             path,
             keys: WalletKeys::from_seed(seed),
@@ -177,7 +246,7 @@ impl Wallet {
         })
     }
 
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&self) -> Result<(), Error> {
         let tmp = self.path.with_extension("json.tmp");
         let f = std::fs::OpenOptions::new()
             .write(true)
@@ -209,7 +278,7 @@ impl Wallet {
     }
 
     /// Paper 16.1 and 16.2 against the indexer's accepted history.
-    pub fn scan(&mut self, state: &State) -> Result<usize> {
+    pub fn scan(&mut self, state: &State) -> Result<usize, Error> {
         let der = self.keys.derive();
         let cursor = self.file.scanned_events;
         let anchored = self.file.scanned_txid.is_some_and(|t| {
@@ -253,7 +322,7 @@ impl Wallet {
             .notes
             .iter()
             .map(|n| own_nullifier(&der, n))
-            .collect::<Result<_>>()?;
+            .collect::<Result<_, Error>>()?;
         let mut found = 0;
         for ev in &state.events[self.file.scanned_events..] {
             match ev {
@@ -281,11 +350,9 @@ impl Wallet {
                     let h_body = env.h_body();
                     for j in 0..N_OUT {
                         let leaf = note::leaf(&h_body, j as u8, &env.pk_eph[j], &env.ct[j]);
-                        ensure!(
-                            state.tree.leaf(t.positions[j]) == Some(leaf),
-                            "replay leaf mismatch at {}",
-                            t.positions[j]
-                        );
+                        if state.tree.leaf(t.positions[j]) != Some(leaf) {
+                            return Err(Error::LeafMismatch(t.positions[j]));
+                        }
                     }
                     for j in 0..N_OUT {
                         let Some(n) =
@@ -331,7 +398,7 @@ impl Wallet {
                                         d: n.d,
                                         pk_d: *pk_d,
                                     }
-                                    .encode();
+                                    .to_string();
                                     self.file.sent.push(SentRecord {
                                         txid: t.txid,
                                         v: n.v,
@@ -367,7 +434,12 @@ impl Wallet {
     }
 
     /// Adds a scanned note unless it is empty or already recorded.
-    fn record(&mut self, der: &SpendingKeys, nfs: &mut HashSet<Fr>, n: OwnedNote) -> Result<bool> {
+    fn record(
+        &mut self,
+        der: &SpendingKeys,
+        nfs: &mut HashSet<Fr>,
+        n: OwnedNote,
+    ) -> Result<bool, Error> {
         if n.v == 0
             || self
                 .file
@@ -383,7 +455,7 @@ impl Wallet {
     }
 
     /// Releases notes locked by a carrier that will never be replayed.
-    pub fn unlock(&mut self, txid: &Txid) -> Result<usize> {
+    pub fn unlock(&mut self, txid: &Txid) -> Result<usize, Error> {
         let mut n = 0;
         for note in self
             .file
@@ -399,7 +471,7 @@ impl Wallet {
         Ok(n)
     }
 
-    pub fn funding_utxos(&self, e: &mut Electrum) -> Result<Vec<Utxo>> {
+    pub fn funding_utxos(&self, e: &mut Electrum) -> Result<Vec<Utxo>, Error> {
         let mut u = e.listunspent(&self.funding.script_pubkey())?;
         u.sort_by(|a, b| b.value.cmp(&a.value));
         Ok(u)
@@ -412,7 +484,7 @@ impl Wallet {
         e: &mut Electrum,
         vault_spk: &ScriptBuf,
         amount: u64,
-    ) -> Result<(Txid, usize, usize)> {
+    ) -> Result<(Txid, usize, usize), Error> {
         let addr = self.address();
         let r_seed = Fr::rand(&mut rand::thread_rng());
         let env = Envelope::Mint(MintEnvelope {
@@ -445,8 +517,10 @@ impl Wallet {
         to: &Address,
         amount: u64,
         payout: Option<Payout>,
-    ) -> Result<(Txid, usize, usize, f64)> {
-        ensure!(amount > 0, "amount must be positive");
+    ) -> Result<(Txid, usize, usize, f64), Error> {
+        if amount == 0 {
+            return Err(Error::ZeroAmount);
+        }
         let der = self.keys.derive();
         // Input selection: up to two unspent, unlocked notes.
         let mut candidates: Vec<usize> = (0..self.file.notes.len())
@@ -462,26 +536,24 @@ impl Wallet {
                 break;
             }
         }
-        ensure!(
-            total >= amount,
-            "insufficient shielded balance: {total} sat available, {amount} needed (two inputs max)"
-        );
+        if total < amount {
+            return Err(Error::InsufficientBalance {
+                available: total,
+                needed: amount,
+            });
+        }
         let mut rng = rand::thread_rng();
         let mut inputs: Vec<InputWitness> = Vec::with_capacity(N_IN);
         for &i in &chosen {
             let n = &self.file.notes[i];
-            let path = state
-                .tree
-                .path(n.pos)
-                .ok_or_else(|| anyhow!("note position {} not in tree", n.pos))?;
+            let path = state.tree.path(n.pos).ok_or(Error::NotInTree(n.pos))?;
             let inp = input_witness(n, path)?;
             // Paper C.4: the local record must still describe the accepted leaf.
-            ensure!(
-                circuit::input_leaf(&der.sk_spend, &inp)
-                    .is_some_and(|leaf| state.tree.leaf(n.pos) == Some(leaf)),
-                "local note {} does not match the replayed leaf",
-                n.pos
-            );
+            if !circuit::input_leaf(&der.sk_spend, &inp)
+                .is_some_and(|leaf| state.tree.leaf(n.pos) == Some(leaf))
+            {
+                return Err(Error::StaleNote(n.pos));
+            }
             inputs.push(inp);
         }
         while inputs.len() < N_IN {
@@ -516,26 +588,21 @@ impl Wallet {
             },
         ];
         let h_anchor = state.replayed_height;
-        let r_anchor = *state
-            .roots
-            .get(&h_anchor)
-            .ok_or_else(|| anyhow!("no root for {h_anchor}"))?;
-        ensure!(
-            r_anchor == state.tree.root(),
-            "indexer state is not at its own tip"
-        );
+        let r_anchor = *state.roots.get(&h_anchor).ok_or(Error::NoRoot(h_anchor))?;
+        if r_anchor != state.tree.root() {
+            return Err(Error::StateNotAtTip);
+        }
 
         let mut w = TransferWitness {
             sk_spend: der.sk_spend,
             h_body: Fr::from(0u64),
-            inputs: inputs.clone().try_into().map_err(|_| anyhow!("arity"))?,
+            inputs: inputs.clone().try_into().map_err(|_| Error::Arity)?,
             outputs: outputs.clone(),
         };
         for nf in circuit::evaluate(&w).nf {
-            ensure!(
-                !state.nullifiers.contains(&nf),
-                "nullifier already in the replayed set"
-            );
+            if state.nullifiers.contains(&nf) {
+                return Err(Error::NullifierReplayed);
+            }
         }
         let st = circuit::evaluate(&w);
         let records: [(crate::EdwardsAffine, Fs); N_OUT] =
@@ -550,7 +617,9 @@ impl Wallet {
             proof: vec![],
         };
         env.ct_out = note::encrypt_recovery(&records, &env.recovery_binding(), &der.vk_out);
-        ensure!(env.ct_out.len() == CT_OUT_LEN, "ct_out length");
+        if env.ct_out.len() != CT_OUT_LEN {
+            return Err(Error::CtOutLength);
+        }
         w.h_body = env.h_body();
         let public = PublicInputs {
             r_anchor,
@@ -559,10 +628,9 @@ impl Wallet {
         let t = Instant::now();
         env.proof = params.prove(&public, &w)?;
         let prove_s = t.elapsed().as_secs_f64();
-        ensure!(
-            params.verify(&public, &env.proof),
-            "own proof failed to verify"
-        );
+        if !params.verify(&public, &env.proof) {
+            return Err(Error::OwnProofInvalid);
+        }
 
         let payload = env.to_bytes();
         let utxos = self.funding_utxos(e)?;
@@ -584,7 +652,7 @@ impl Wallet {
         &mut self,
         e: &mut Electrum,
         state: &State,
-    ) -> Result<Vec<(Txid, u64, Txid)>> {
+    ) -> Result<Vec<(Txid, u64, Txid)>, Error> {
         let der = self.keys.derive();
         // Payout carriers publish nf[0] in their OP_RETURN, so the chain itself
         // says what was already paid.
@@ -620,7 +688,7 @@ impl Wallet {
             let tx = match validate_payout(p, n.v).and_then(|_| self.build_payout(e, p, &nf)) {
                 Ok(tx) => tx,
                 Err(err) => {
-                    self.fail_payout(&t.txid, key, err.into())?;
+                    self.fail_payout(&t.txid, key, err)?;
                     continue;
                 }
             };
@@ -638,7 +706,7 @@ impl Wallet {
         Ok(done)
     }
 
-    fn build_payout(&self, e: &mut Electrum, p: &Payout, nf: &[u8]) -> Result<Transaction> {
+    fn build_payout(&self, e: &mut Electrum, p: &Payout, nf: &[u8]) -> Result<Transaction, Error> {
         let mut utxos = e.listunspent(&self.vault.script_pubkey())?;
         utxos.sort_by(|a, b| b.value.cmp(&a.value));
         let out = |v: u64| {
@@ -649,44 +717,43 @@ impl Wallet {
         };
         let fee =
             self.vault.build_carrier(&utxos, nf, out(p.amount))?.vsize() as u64 * FEE_RATE_SAT_VB;
-        ensure!(
-            p.amount >= fee + 546,
-            "{} sat does not cover the {fee} sat fee plus dust",
-            p.amount
-        );
-        self.vault.build_carrier(&utxos, nf, out(p.amount - fee))
+        if p.amount < fee + 546 {
+            return Err(Error::PayoutBelowFee {
+                amount: p.amount,
+                fee,
+            });
+        }
+        Ok(self.vault.build_carrier(&utxos, nf, out(p.amount - fee))?)
     }
 
-    fn fail_payout(&mut self, txid: &Txid, key: String, err: anyhow::Error) -> Result<()> {
-        eprintln!("payout in {txid} not paid: {err:#}");
-        self.file.failed_payouts.insert(key, format!("{err:#}"));
+    fn fail_payout(&mut self, txid: &Txid, key: String, err: Error) -> Result<(), Error> {
+        eprintln!("payout in {txid} not paid: {err}");
+        self.file.failed_payouts.insert(key, err.to_string());
         self.save()
     }
 }
 
 /// A peg-out request must not exceed the burn, must clear dust, and must
 /// pay a standard single-key or script-hash output.
-pub fn validate_payout(p: &Payout, burned: u64) -> Result<()> {
-    ensure!(
-        p.amount <= burned,
-        "asks {} sat but burned {burned} sat",
-        p.amount
-    );
-    ensure!(p.amount >= 546, "{} sat is below dust", p.amount);
+pub fn validate_payout(p: &Payout, burned: u64) -> Result<(), Error> {
+    if p.amount > burned {
+        return Err(Error::PayoutExceedsBurn {
+            amount: p.amount,
+            burned,
+        });
+    }
+    if p.amount < 546 {
+        return Err(Error::PayoutBelowDust(p.amount));
+    }
     let s = bitcoin::Script::from_bytes(&p.script_pubkey);
-    ensure!(
-        s.is_p2wpkh() || s.is_p2tr() || s.is_p2sh() || s.is_p2pkh(),
-        "non-standard payout script"
-    );
-    bitcoin::Address::from_script(s, NETWORK).context("payout script")?;
+    if !(s.is_p2wpkh() || s.is_p2tr() || s.is_p2sh() || s.is_p2pkh()) {
+        return Err(Error::NonStandardPayout);
+    }
+    bitcoin::Address::from_script(s, NETWORK)?;
     Ok(())
 }
 
-pub fn parse_address(s: &str) -> Result<Address> {
-    Address::decode(s).ok_or_else(|| anyhow!("not a shielded address: {s}"))
-}
-
-pub fn note_plaintext(n: &OwnedNote) -> Result<NotePlaintext> {
+pub fn note_plaintext(n: &OwnedNote) -> Result<NotePlaintext, Error> {
     Ok(NotePlaintext {
         v: n.v,
         d: d_from_hex(&n.d)?,

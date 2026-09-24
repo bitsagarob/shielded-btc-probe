@@ -8,8 +8,9 @@ use shielded_probe::{
     circuit::{TransferCircuit, sample::sample_witness},
     envelope::Payout,
     indexer::{Deployment, Event, State},
+    keys::Address,
     prover::Params,
-    wallet::{Wallet, parse_address},
+    wallet::Wallet,
 };
 use std::{
     path::{Path, PathBuf},
@@ -119,7 +120,7 @@ fn load_state(dir: &Path) -> Result<State> {
         serde_json::from_reader(std::fs::File::open(dir.join("deployment.json"))?)?;
     let sp = dir.join("state.json");
     if sp.exists() {
-        State::load(&sp)
+        Ok(State::load(&sp)?)
     } else {
         Ok(State::fresh(dep))
     }
@@ -192,7 +193,7 @@ fn main() -> Result<()> {
             let dep = Deployment {
                 activation: *activation,
                 vault_script_pubkey: hex::encode(op.vault().script_pubkey().as_bytes()),
-                operator_address: op.address().encode(),
+                operator_address: op.address().to_string(),
                 vk_fingerprint: params.vk_fingerprint(),
             };
             std::fs::create_dir_all(&cli.state)?;
@@ -211,7 +212,7 @@ fn main() -> Result<()> {
             let w = Wallet::create(wallet)?;
             println!(
                 "shielded {}\nfunding  {}\nvault    {}",
-                w.address().encode(),
+                w.address(),
                 w.funding.address(),
                 w.vault().address()
             );
@@ -220,7 +221,7 @@ fn main() -> Result<()> {
             let w = Wallet::open(wallet)?;
             println!(
                 "shielded {}\nfunding  {}\nvault    {}",
-                w.address().encode(),
+                w.address(),
                 w.funding.address(),
                 w.vault().address()
             );
@@ -284,7 +285,7 @@ fn main() -> Result<()> {
             let (st, mut e) = synced_state(&cli, &params)?;
             let mut w = Wallet::open(wallet)?;
             w.scan(&st)?;
-            let to = parse_address(to)?;
+            let to: Address = to.parse()?;
             let (txid, bytes, vsize, prove_s) = w.send(&mut e, &st, &params, &to, *amount, None)?;
             println!(
                 "send txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, proof {prove_s:.2}s, anchor {}",
@@ -296,7 +297,7 @@ fn main() -> Result<()> {
             let (st, mut e) = synced_state(&cli, &params)?;
             let mut w = Wallet::open(wallet)?;
             w.scan(&st)?;
-            let op = parse_address(&st.deployment.operator_address)?;
+            let op: Address = st.deployment.operator_address.parse()?;
             let addr: bitcoin::Address = to
                 .parse::<bitcoin::Address<_>>()?
                 .require_network(shielded_probe::chain::NETWORK)?;

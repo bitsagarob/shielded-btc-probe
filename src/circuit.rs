@@ -372,7 +372,7 @@ pub fn evaluate(w: &TransferWitness) -> NativeStatement {
             },
             &o.pk_d,
         )
-        .expect("output diversifiers were checked by Address::decode");
+        .expect("output diversifiers were checked by Address::from_str");
         pk_eph[j] = p;
         ct[j] = c;
     }

@@ -3,22 +3,46 @@
 
 use crate::{
     Fr, K_MIN, N_OUT, WINDOW_W,
-    chain::{Electrum, op_return_payload},
-    envelope::{Envelope, MintEnvelope, TransferEnvelope},
+    chain::{self, Electrum, op_return_payload},
+    envelope::{self, Envelope, MintEnvelope, TransferEnvelope},
     keys, note,
     prover::Params,
     tree::MerkleTree,
 };
-use anyhow::{Context, Result, ensure};
 use bitcoin::{BlockHash, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 /// Rejections kept in the state file: the most recent ones.
 pub const MAX_REJECTIONS: usize = 1000;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("opening {}: {source}", path.display())]
+    Open {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Hex(#[from] hex::FromHexError),
+    #[error(transparent)]
+    Chain(#[from] chain::Error),
+    #[error("bad leaf")]
+    BadLeaf,
+    #[error("bad nullifier")]
+    BadNullifier,
+    #[error("bad root")]
+    BadRoot,
+    #[error("block {0} changed while it was being fetched")]
+    BlockChanged(u32),
+}
 
 /// Deployment profile: fixed once, shared by every wallet and indexer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,7 +54,7 @@ pub struct Deployment {
 }
 
 impl Deployment {
-    pub fn vault_spk(&self) -> Result<ScriptBuf> {
+    pub fn vault_spk(&self) -> Result<ScriptBuf, Error> {
         Ok(ScriptBuf::from_bytes(hex::decode(
             &self.vault_script_pubkey,
         )?))
@@ -95,7 +119,7 @@ pub enum RejectReason {
     #[error("carrier: {0}")]
     Carrier(&'static str),
     #[error("parse: {0}")]
-    Parse(String),
+    Parse(#[from] envelope::Error),
     #[error("anchor {anchor} outside window for block {height}")]
     AnchorOutsideWindow { anchor: u32, height: u32 },
     #[error("no retained root for anchor {0}")]
@@ -151,13 +175,15 @@ impl State {
         }
     }
 
-    pub fn load(path: &Path) -> Result<Self> {
-        let f: StateFile = serde_json::from_reader(
-            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?,
-        )?;
+    pub fn load(path: &Path) -> Result<Self, Error> {
+        let file = std::fs::File::open(path).map_err(|source| Error::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let f: StateFile = serde_json::from_reader(file)?;
         let mut tree = MerkleTree::new();
         for l in &f.leaves {
-            tree.append(keys::fr_from_bytes(&hex::decode(l)?).context("bad leaf")?);
+            tree.append(keys::fr_from_bytes(&hex::decode(l)?).ok_or(Error::BadLeaf)?);
         }
         Ok(Self {
             deployment: f.deployment,
@@ -168,26 +194,26 @@ impl State {
                 .iter()
                 .map(|h| {
                     keys::fr_from_bytes(&hex::decode(h).unwrap_or_default())
-                        .context("bad nullifier")
+                        .ok_or(Error::BadNullifier)
                 })
-                .collect::<Result<_>>()?,
+                .collect::<Result<_, Error>>()?,
             roots: f
                 .roots
                 .iter()
                 .map(|(h, r)| {
                     Ok((
                         *h,
-                        keys::fr_from_bytes(&hex::decode(r)?).context("bad root")?,
+                        keys::fr_from_bytes(&hex::decode(r)?).ok_or(Error::BadRoot)?,
                     ))
                 })
-                .collect::<Result<_>>()?,
+                .collect::<Result<_, Error>>()?,
             block_hashes: f.block_hashes.into_iter().collect(),
             events: f.events,
             rejections: f.rejections,
         })
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
         let f = StateFile {
             deployment: self.deployment.clone(),
             replayed_height: self.replayed_height,
@@ -220,7 +246,7 @@ impl State {
     /// Replays every block from replayed_height + 1 to the tip. Returns the
     /// number of blocks processed. On a reorganisation the whole state is
     /// rebuilt from activation, which is cheap on a probe.
-    pub fn sync(&mut self, e: &mut Electrum, params: &Params) -> Result<u32> {
+    pub fn sync(&mut self, e: &mut Electrum, params: &Params) -> Result<u32, Error> {
         let tip = e.tip_height()?;
         if let Some(h) = self.block_hashes.get(&self.replayed_height).copied() {
             if e.block_hash(self.replayed_height)? != h {
@@ -243,16 +269,15 @@ impl State {
     /// Fetches the whole block before touching state, and bails if the
     /// block hash moved meanwhile: nothing is mutated and the next sync
     /// rebuilds from its stored tip.
-    fn replay_block(&mut self, e: &mut Electrum, params: &Params, h: u32) -> Result<()> {
+    fn replay_block(&mut self, e: &mut Electrum, params: &Params, h: u32) -> Result<(), Error> {
         let hash = e.block_hash(h)?;
         let mut txs = Vec::new();
         for txid in e.block_txids(h)? {
             txs.push((txid, e.transaction(&txid)?));
         }
-        ensure!(
-            e.block_hash(h)? == hash,
-            "block {h} changed while it was being fetched"
-        );
+        if e.block_hash(h)? != hash {
+            return Err(Error::BlockChanged(h));
+        }
         let vault = self.deployment.vault_spk()?;
         for (txid, tx) in &txs {
             if let Err(reason) = self.replay_tx(params, h, *txid, tx, &vault) {
@@ -289,7 +314,7 @@ impl State {
         let Some(payload) = op_return_payload(tx).map_err(RejectReason::Carrier)? else {
             return Ok(());
         };
-        match Envelope::parse(&payload).map_err(|e| RejectReason::Parse(e.to_string()))? {
+        match Envelope::parse(&payload)? {
             None => Ok(()),
             Some(Envelope::Transfer(t)) => self.accept_transfer(params, h, txid, &t, &payload),
             Some(Envelope::Mint(m)) => {

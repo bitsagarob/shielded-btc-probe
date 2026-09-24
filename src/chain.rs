@@ -2,16 +2,15 @@
 //! the carrier transaction that publishes an envelope in one OP_RETURN.
 
 use crate::envelope::MAGIC;
-use anyhow::{Result, bail};
 use bitcoin::{
     Address, Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction,
     TxIn, TxOut, Txid, Witness, absolute,
     consensus::{deserialize, serialize},
     hashes::{Hash, sha256},
     key::Secp256k1,
-    script::Instruction,
-    secp256k1::{Message, SecretKey},
-    sighash::{EcdsaSighashType, SighashCache},
+    script::{Instruction, PushBytesBuf, PushBytesError},
+    secp256k1::{self, Message, SecretKey},
+    sighash::{EcdsaSighashType, P2wpkhError, SighashCache},
     transaction,
 };
 use serde_json::{Value, json};
@@ -34,6 +33,14 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("protocol: {0}")]
     Protocol(String),
+    #[error("insufficient funds: have {have} sat, need {need} sat")]
+    InsufficientFunds { have: u64, need: u64 },
+    #[error("fee did not converge")]
+    FeeDidNotConverge,
+    #[error(transparent)]
+    PushBytes(#[from] PushBytesError),
+    #[error(transparent)]
+    Sighash(#[from] P2wpkhError),
 }
 
 fn protocol<E: std::fmt::Display>(e: E) -> Error {
@@ -224,7 +231,7 @@ pub struct FundingKey {
 }
 
 impl FundingKey {
-    pub fn from_bytes(b: &[u8; 32]) -> Result<Self> {
+    pub fn from_bytes(b: &[u8; 32]) -> Result<Self, secp256k1::Error> {
         Ok(Self {
             sk: SecretKey::from_slice(b)?,
         })
@@ -247,14 +254,12 @@ impl FundingKey {
         utxos: &[Utxo],
         payload: &[u8],
         extra: Vec<TxOut>,
-    ) -> Result<Transaction> {
+    ) -> Result<Transaction, Error> {
         let spk = self.script_pubkey();
         let extra_total: u64 = extra.iter().map(|o| o.value.to_sat()).sum();
         let op_return = TxOut {
             value: Amount::ZERO,
-            script_pubkey: ScriptBuf::new_op_return(bitcoin::script::PushBytesBuf::try_from(
-                payload.to_vec(),
-            )?),
+            script_pubkey: ScriptBuf::new_op_return(PushBytesBuf::try_from(payload.to_vec())?),
         };
         // Two passes: size with a zero fee, then re-sign with the real fee.
         let mut fee = 0u64;
@@ -269,10 +274,10 @@ impl FundingKey {
                 }
             }
             if total < extra_total + fee {
-                bail!(
-                    "insufficient funds: have {total} sat, need {} sat",
-                    extra_total + fee
-                );
+                return Err(Error::InsufficientFunds {
+                    have: total,
+                    need: extra_total + fee,
+                });
             }
             let mut outputs = extra.clone();
             outputs.push(op_return.clone());
@@ -305,10 +310,10 @@ impl FundingKey {
             fee = want;
         }
         // Fee rose on the second pass (more inputs); one more pass is enough in practice.
-        bail!("fee did not converge")
+        Err(Error::FeeDidNotConverge)
     }
 
-    fn sign_p2wpkh(&self, tx: &mut Transaction, spent: &[Utxo]) -> Result<()> {
+    fn sign_p2wpkh(&self, tx: &mut Transaction, spent: &[Utxo]) -> Result<(), Error> {
         let secp = Secp256k1::new();
         let spk = self.script_pubkey();
         let mut cache = SighashCache::new(tx.clone());

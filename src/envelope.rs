@@ -7,7 +7,6 @@ use crate::{
     note::{CIPHERTEXT_LEN, Ciphertext},
     poseidon::{self, tag},
 };
-use anyhow::{Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 pub const MAGIC: &[u8; 3] = b"sbp";
@@ -17,6 +16,39 @@ pub const KIND_MINT: u8 = 0x02;
 pub const PROOF_LEN: usize = 192;
 /// Sender-recovery record per output: pk_d (32) || sk_eph (32).
 pub const CT_OUT_LEN: usize = N_OUT * 64 + 16;
+
+/// Why bytes that carry the magic are not an envelope.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    #[error("unknown version {0}")]
+    UnknownVersion(u8),
+    #[error("reserved header byte set")]
+    ReservedByteSet,
+    #[error("unsupported input count")]
+    InputCount,
+    #[error("unsupported output count")]
+    OutputCount,
+    #[error("non-canonical nullifier")]
+    Nullifier,
+    #[error("bad pk_eph")]
+    PkEph,
+    #[error("bad ciphertext")]
+    Ciphertext,
+    #[error("payout too short")]
+    PayoutTooShort,
+    #[error("bad pk_d")]
+    PkD,
+    #[error("non-canonical r_seed")]
+    RSeed,
+    #[error("unknown envelope kind {0:#x}")]
+    UnknownKind(u8),
+    #[error("trailing bytes after envelope")]
+    TrailingBytes,
+    #[error("non-canonical envelope encoding")]
+    NonCanonical,
+    #[error("envelope truncated")]
+    Truncated,
+}
 
 /// Optional peg-out request bound into the body: pay `amount` sats to
 /// `script_pubkey` from the vault. Outside the paper.
@@ -158,27 +190,33 @@ impl Envelope {
     /// Strict canonical parse. Returns None when the bytes are not an
     /// envelope at all (wrong magic), Err when they claim to be one and
     /// fail to decode or do not re-serialise to the same bytes (A.5).
-    pub fn parse(b: &[u8]) -> Result<Option<Self>> {
+    pub fn parse(b: &[u8]) -> Result<Option<Self>, Error> {
         if b.len() < 6 || &b[..3] != MAGIC {
             return Ok(None);
         }
-        ensure!(b[3] == VERSION, "unknown version {}", b[3]);
-        ensure!(b[5] == 0, "reserved header byte set");
+        if b[3] != VERSION {
+            return Err(Error::UnknownVersion(b[3]));
+        }
+        if b[5] != 0 {
+            return Err(Error::ReservedByteSet);
+        }
         let mut r = Reader { b, pos: 6 };
         let env = match b[4] {
             KIND_TRANSFER => {
                 let h_anchor = u32::from_le_bytes(r.take(4)?.try_into().unwrap());
-                ensure!(r.take(1)?[0] as usize == N_IN, "unsupported input count");
-                ensure!(r.take(1)?[0] as usize == N_OUT, "unsupported output count");
+                if r.take(1)?[0] as usize != N_IN {
+                    return Err(Error::InputCount);
+                }
+                if r.take(1)?[0] as usize != N_OUT {
+                    return Err(Error::OutputCount);
+                }
                 let mut nf = [Fr::from(0u64); N_IN];
                 for x in nf.iter_mut() {
-                    *x = keys::fr_from_bytes(r.take(32)?)
-                        .ok_or_else(|| anyhow::anyhow!("non-canonical nullifier"))?;
+                    *x = keys::fr_from_bytes(r.take(32)?).ok_or(Error::Nullifier)?;
                 }
                 let mut pk_eph = [EdwardsAffine::default(); N_OUT];
                 for x in pk_eph.iter_mut() {
-                    *x = keys::point_from_bytes(r.take(32)?)
-                        .ok_or_else(|| anyhow::anyhow!("bad pk_eph"))?;
+                    *x = keys::point_from_bytes(r.take(32)?).ok_or(Error::PkEph)?;
                 }
                 let mut ct = [Ciphertext {
                     c0: Fr::from(0u64),
@@ -186,15 +224,17 @@ impl Envelope {
                     tag: Fr::from(0u64),
                 }; N_OUT];
                 for x in ct.iter_mut() {
-                    *x = Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?)
-                        .ok_or_else(|| anyhow::anyhow!("bad ciphertext"))?;
+                    *x =
+                        Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?).ok_or(Error::Ciphertext)?;
                 }
                 let ct_out = r.take(CT_OUT_LEN)?.to_vec();
                 let plen = r.take(1)?[0] as usize;
                 let payout = if plen == 0 {
                     None
                 } else {
-                    ensure!(plen > 8, "payout too short");
+                    if plen <= 8 {
+                        return Err(Error::PayoutTooShort);
+                    }
                     let amount = u64::from_le_bytes(r.take(8)?.try_into().unwrap());
                     let script_pubkey = r.take(plen - 8)?.to_vec();
                     Some(Payout {
@@ -216,16 +256,18 @@ impl Envelope {
             KIND_MINT => {
                 let mut d = [0u8; DIVERSIFIER_LEN];
                 d.copy_from_slice(r.take(DIVERSIFIER_LEN)?);
-                let pk_d = keys::point_from_bytes(r.take(32)?)
-                    .ok_or_else(|| anyhow::anyhow!("bad pk_d"))?;
-                let r_seed = keys::fr_from_bytes(r.take(32)?)
-                    .ok_or_else(|| anyhow::anyhow!("non-canonical r_seed"))?;
+                let pk_d = keys::point_from_bytes(r.take(32)?).ok_or(Error::PkD)?;
+                let r_seed = keys::fr_from_bytes(r.take(32)?).ok_or(Error::RSeed)?;
                 Envelope::Mint(MintEnvelope { d, pk_d, r_seed })
             }
-            k => bail!("unknown envelope kind {k:#x}"),
+            k => return Err(Error::UnknownKind(k)),
         };
-        ensure!(r.pos == b.len(), "trailing bytes after envelope");
-        ensure!(env.to_bytes() == b, "non-canonical envelope encoding");
+        if r.pos != b.len() {
+            return Err(Error::TrailingBytes);
+        }
+        if env.to_bytes() != b {
+            return Err(Error::NonCanonical);
+        }
         Ok(Some(env))
     }
 }
@@ -235,8 +277,10 @@ struct Reader<'a> {
     pos: usize,
 }
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        ensure!(self.pos + n <= self.b.len(), "envelope truncated");
+    fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
+        if self.pos + n > self.b.len() {
+            return Err(Error::Truncated);
+        }
         let s = &self.b[self.pos..self.pos + n];
         self.pos += n;
         Ok(s)

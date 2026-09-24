@@ -6,12 +6,12 @@
 //! anywhere else. See PROFILE.md.
 
 use crate::circuit::{PublicInputs, TransferCircuit, TransferWitness};
-use anyhow::{Context, Result};
 use ark_bls12_381::Bls12_381;
 use ark_groth16::{
     Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey, prepare_verifying_key,
 };
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_relations::r1cs::SynthesisError;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_snark::SNARK;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -20,6 +20,22 @@ use std::{path::Path, time::Instant};
 
 pub const INSECURE_SETUP_SEED: &[u8; 32] = b"sbp-probe-insecure-toxic-waste-0";
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("reading proving key: {0}")]
+    ProvingKey(SerializationError),
+    #[error("reading verifying key: {0}")]
+    VerifyingKey(SerializationError),
+    #[error(transparent)]
+    Serialization(#[from] SerializationError),
+    #[error("setup: {0:?}")]
+    Setup(SynthesisError),
+    #[error("prove: {0:?}")]
+    Prove(SynthesisError),
+}
+
 pub struct Params {
     pub pk: ProvingKey<Bls12_381>,
     pub vk: VerifyingKey<Bls12_381>,
@@ -27,29 +43,29 @@ pub struct Params {
 }
 
 impl Params {
-    pub fn setup_insecure() -> Result<Self> {
+    pub fn setup_insecure() -> Result<Self, Error> {
         let mut rng = ChaCha20Rng::from_seed(*INSECURE_SETUP_SEED);
         let circuit = TransferCircuit {
             public: None,
             witness: None,
         };
         let (pk, vk) = Groth16::<Bls12_381>::circuit_specific_setup(circuit, &mut rng)
-            .map_err(|e| anyhow::anyhow!("setup: {e:?}"))?;
+            .map_err(Error::Setup)?;
         let pvk = prepare_verifying_key(&vk);
         Ok(Self { pk, vk, pvk })
     }
 
     /// Loads `dir/transfer.pk` and `dir/transfer.vk`, generating them on
     /// first use. Logs how long generation took.
-    pub fn load_or_setup(dir: &Path) -> Result<Self> {
+    pub fn load_or_setup(dir: &Path) -> Result<Self, Error> {
         let pk_path = dir.join("transfer.pk");
         let vk_path = dir.join("transfer.vk");
         if pk_path.exists() && vk_path.exists() {
             let pk = ProvingKey::deserialize_uncompressed_unchecked(std::fs::File::open(&pk_path)?)
-                .context("reading proving key")?;
+                .map_err(Error::ProvingKey)?;
             let vk =
                 VerifyingKey::deserialize_uncompressed_unchecked(std::fs::File::open(&vk_path)?)
-                    .context("reading verifying key")?;
+                    .map_err(Error::VerifyingKey)?;
             let pvk = prepare_verifying_key(&vk);
             return Ok(Self { pk, vk, pvk });
         }
@@ -69,14 +85,18 @@ impl Params {
     }
 
     /// Produces the 192-byte compressed proof.
-    pub fn prove(&self, public: &PublicInputs, witness: &TransferWitness) -> Result<Vec<u8>> {
+    pub fn prove(
+        &self,
+        public: &PublicInputs,
+        witness: &TransferWitness,
+    ) -> Result<Vec<u8>, Error> {
         let mut rng = rand::thread_rng();
         let circuit = TransferCircuit {
             public: Some(public.clone()),
             witness: Some(witness.clone()),
         };
-        let proof = Groth16::<Bls12_381>::prove(&self.pk, circuit, &mut rng)
-            .map_err(|e| anyhow::anyhow!("prove: {e:?}"))?;
+        let proof =
+            Groth16::<Bls12_381>::prove(&self.pk, circuit, &mut rng).map_err(Error::Prove)?;
         let mut out = Vec::with_capacity(192);
         proof.serialize_compressed(&mut out)?;
         Ok(out)
