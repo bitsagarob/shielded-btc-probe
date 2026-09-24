@@ -226,7 +226,7 @@ mod tests {
         let w = WalletKeys::from_seed([3u8; 32]);
         let a = w.address(0);
         let n = NotePlaintext { v: 5, d: a.d, r_seed: Fr::from(8u64) };
-        let (pk, ct) = encrypt(&n, &a.pk_d);
+        let (pk, ct) = encrypt(&n, &a.pk_d).unwrap();
         let env = TransferEnvelope {
             h_anchor: 42,
             nf: [Fr::from(1u64), Fr::from(2u64)],

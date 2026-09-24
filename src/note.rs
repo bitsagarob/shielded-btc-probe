@@ -94,14 +94,14 @@ pub fn encrypt_with_key(key: &Fr, m0: &Fr, m1: &Fr) -> Ciphertext {
     Ciphertext { c0, c1, tag: t }
 }
 
-/// Sender side. Returns (pk_eph, ciphertext).
-pub fn encrypt(note: &NotePlaintext, pk_d: &EdwardsAffine) -> (EdwardsAffine, Ciphertext) {
-    let g_d = keys::diversify_hash(&note.d).base;
+/// Sender side. Returns (pk_eph, ciphertext), None when d has no diversified base.
+pub fn encrypt(note: &NotePlaintext, pk_d: &EdwardsAffine) -> Option<(EdwardsAffine, Ciphertext)> {
+    let g_d = keys::diversify_hash(&note.d)?.base;
     let s = sk_eph(&note.r_seed);
     let pk_eph = keys::mul(&g_d, &s);
     let shared = keys::mul(pk_d, &s);
     let key = note_key(&shared, &pk_eph);
-    (pk_eph, encrypt_with_key(&key, &pack_vd(note.v, &note.d), &note.r_seed))
+    Some((pk_eph, encrypt_with_key(&key, &pack_vd(note.v, &note.d), &note.r_seed)))
 }
 
 fn decrypt_with_key(key: &Fr, ct: &Ciphertext) -> Option<NotePlaintext> {
@@ -119,7 +119,7 @@ fn decrypt_with_key(key: &Fr, ct: &Ciphertext) -> Option<NotePlaintext> {
 pub fn decrypt_as_recipient(ct: &Ciphertext, pk_eph: &EdwardsAffine, sk_view: &Fs) -> Option<NotePlaintext> {
     let shared = keys::mul(pk_eph, sk_view);
     let note = decrypt_with_key(&note_key(&shared, pk_eph), ct)?;
-    let g_d = keys::diversify_hash(&note.d).base;
+    let g_d = keys::diversify_hash(&note.d)?.base;
     (keys::mul(&g_d, &sk_eph(&note.r_seed)) == *pk_eph).then_some(note)
 }
 
@@ -127,7 +127,7 @@ pub fn decrypt_as_recipient(ct: &Ciphertext, pk_eph: &EdwardsAffine, sk_view: &F
 pub fn decrypt_as_sender(ct: &Ciphertext, pk_eph: &EdwardsAffine, pk_d: &EdwardsAffine, s: &Fs) -> Option<NotePlaintext> {
     let shared = keys::mul(pk_d, s);
     let note = decrypt_with_key(&note_key(&shared, pk_eph), ct)?;
-    let g_d = keys::diversify_hash(&note.d).base;
+    let g_d = keys::diversify_hash(&note.d)?.base;
     (keys::mul(&g_d, &sk_eph(&note.r_seed)) == *pk_eph).then_some(note)
 }
 
@@ -157,7 +157,7 @@ mod tests {
         let bob = WalletKeys::from_seed([1u8; 32]);
         let addr = bob.address(3);
         let note = NotePlaintext { v: 123_456, d: addr.d, r_seed: Fr::from(99u64) };
-        let (pk_eph, ct) = encrypt(&note, &addr.pk_d);
+        let (pk_eph, ct) = encrypt(&note, &addr.pk_d).unwrap();
         assert_eq!(decrypt_as_recipient(&ct, &pk_eph, &bob.derive().sk_view), Some(note.clone()));
         assert_eq!(decrypt_as_sender(&ct, &pk_eph, &addr.pk_d, &sk_eph(&note.r_seed)), Some(note.clone()));
         let other = WalletKeys::from_seed([2u8; 32]);

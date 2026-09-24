@@ -13,7 +13,7 @@ pub struct MerkleTree {
     /// nodes[level][index]; level 0 holds leaves, level TREE_DEPTH the root.
     nodes: Vec<HashMap<u64, Fr>>,
     empty: Vec<Fr>,
-    pub len: u64,
+    len: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +45,10 @@ impl MerkleTree {
 
     pub fn root(&self) -> Fr {
         self.get(TREE_DEPTH, 0)
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
     }
 
     /// Appends a leaf and returns its position.
