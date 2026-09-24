@@ -80,6 +80,8 @@ pub enum Error {
     PayoutScript(#[from] FromScriptError),
     #[error("{amount} sat does not cover the {fee} sat fee plus dust")]
     PayoutBelowFee { amount: u64, fee: u64 },
+    #[error("carrier {0} is still in the mempool or chain, pass --force to unlock anyway")]
+    CarrierPresent(Txid),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -427,8 +429,21 @@ impl Wallet {
         true
     }
 
-    /// Releases notes locked by a carrier that will never be replayed.
-    pub fn unlock(&mut self, txid: &Txid) -> Result<usize, Error> {
+    /// Releases notes locked by a carrier that will never be replayed. Refuses
+    /// while the carrier is still known to the chain unless forced.
+    pub fn unlock(
+        &mut self,
+        client: &mut Electrum,
+        txid: &Txid,
+        force: bool,
+    ) -> Result<usize, Error> {
+        if !force {
+            match client.transaction(txid) {
+                Ok(_) => return Err(Error::CarrierPresent(*txid)),
+                Err(chain::Error::Rpc { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         let mut n = 0;
         for note in self
             .file

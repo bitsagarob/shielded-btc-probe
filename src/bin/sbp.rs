@@ -68,6 +68,9 @@ enum Cmd {
     Unlock {
         #[arg(long)]
         txid: String,
+        /// Unlock even if the carrier is still in the mempool or chain.
+        #[arg(long)]
+        force: bool,
     },
     /// Shielded transfer.
     Send {
@@ -148,7 +151,7 @@ fn main() -> Result<()> {
         Cmd::Status => status(&cli),
         Cmd::Mint { amount } => mint(&cli, *amount),
         Cmd::Scan => scan(&cli),
-        Cmd::Unlock { txid } => unlock(&cli, txid),
+        Cmd::Unlock { txid, force } => unlock(&cli, txid, *force),
         Cmd::Send { to, amount } => send(&cli, to, *amount),
         Cmd::Redeem { amount, to } => redeem(&cli, *amount, to),
         Cmd::PublishRaw { hex } => publish_raw(&cli, hex),
@@ -285,9 +288,10 @@ fn scan(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn unlock(cli: &Cli, txid: &str) -> Result<()> {
+fn unlock(cli: &Cli, txid: &str, force: bool) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
-    let n = w.unlock(&txid.parse()?)?;
+    let mut e = Electrum::connect(&cli.electrum)?;
+    let n = w.unlock(&mut e, &txid.parse()?, force)?;
     println!("unlocked {n} notes, balance {} sat", w.balance());
     Ok(())
 }

@@ -202,8 +202,31 @@ fn unlock_releases_a_lock_without_anchor() {
     st.replayed_height += 500;
     alice.scan(&st).unwrap();
     assert_eq!(alice.balance(), 0);
-    assert_eq!(alice.unlock(&Txid::from_byte_array([8; 32])).unwrap(), 0);
-    assert_eq!(alice.unlock(&carrier).unwrap(), 1);
+    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    assert_eq!(
+        alice
+            .unlock(&mut e, &Txid::from_byte_array([8; 32]), false)
+            .unwrap(),
+        0
+    );
+    assert_eq!(alice.unlock(&mut e, &carrier, false).unwrap(), 1);
+    assert_eq!(alice.balance(), 1000);
+}
+
+#[test]
+fn unlock_refuses_while_the_carrier_is_known_to_the_chain() {
+    let op = Wallet::create(&tmp("op14")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice14")).unwrap();
+    let mut st = fresh_state(&op);
+    mint_to(&mut st, &alice, 1000, 5, 1);
+    alice.scan(&st).unwrap();
+    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let mined = e.block_txids(100).unwrap()[0];
+    alice.file.notes[0].locked_by = Some(mined);
+    assert_eq!(alice.balance(), 0);
+    assert!(alice.unlock(&mut e, &mined, false).is_err());
+    assert_eq!(alice.balance(), 0);
+    assert_eq!(alice.unlock(&mut e, &mined, true).unwrap(), 1);
     assert_eq!(alice.balance(), 1000);
 }
 
