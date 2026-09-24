@@ -2,8 +2,11 @@
 //! and in-circuit. Every use is domain-separated by a tag absorbed first.
 
 use ark_bls12_381::Fr;
-use ark_crypto_primitives::sponge::poseidon::{find_poseidon_ark_and_mds, PoseidonConfig, PoseidonSponge};
-use ark_crypto_primitives::sponge::{CryptographicSponge, FieldBasedCryptographicSponge};
+use ark_crypto_primitives::sponge::{
+    CryptographicSponge, FieldBasedCryptographicSponge,
+    poseidon::{PoseidonConfig, PoseidonSponge, find_poseidon_ark_and_mds},
+};
+use ark_ff::PrimeField;
 use std::sync::OnceLock;
 
 pub const FULL_ROUNDS: usize = 8;
@@ -58,7 +61,6 @@ pub fn hash(tag: u64, inputs: &[Fr]) -> Fr {
 /// Hash arbitrary bytes: packed into 31-byte little-endian field elements,
 /// length-prefixed so the map is injective.
 pub fn hash_bytes(tag: u64, bytes: &[u8]) -> Fr {
-    use ark_ff::PrimeField;
     let mut elems = vec![Fr::from(bytes.len() as u64)];
     for chunk in bytes.chunks(31) {
         elems.push(Fr::from_le_bytes_mod_order(chunk));

@@ -1,18 +1,21 @@
 //! Deterministic replay of accepted envelopes into shielded state
 //! (paper sections 8, 15, A.6, A.7).
 
-use crate::chain::{op_return_payload, Electrum};
-use crate::envelope::{Envelope, MintEnvelope, TransferEnvelope};
-use crate::keys;
-use crate::note;
-use crate::prover::Params;
-use crate::tree::MerkleTree;
-use crate::{Fr, K_MIN, N_OUT, WINDOW_W};
-use anyhow::{ensure, Context, Result};
+use crate::{
+    Fr, K_MIN, N_OUT, WINDOW_W,
+    chain::{Electrum, op_return_payload},
+    envelope::{Envelope, MintEnvelope, TransferEnvelope},
+    keys, note,
+    prover::Params,
+    tree::MerkleTree,
+};
+use anyhow::{Context, Result, ensure};
 use bitcoin::{BlockHash, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 /// Rejections kept in the state file: the most recent ones.
 pub const MAX_REJECTIONS: usize = 1000;
@@ -28,7 +31,9 @@ pub struct Deployment {
 
 impl Deployment {
     pub fn vault_spk(&self) -> Result<ScriptBuf> {
-        Ok(ScriptBuf::from_bytes(hex::decode(&self.vault_script_pubkey)?))
+        Ok(ScriptBuf::from_bytes(hex::decode(
+            &self.vault_script_pubkey,
+        )?))
     }
 }
 
@@ -57,7 +62,9 @@ pub enum Event {
 
 impl AcceptedTransfer {
     pub fn envelope(&self) -> TransferEnvelope {
-        match Envelope::parse(&hex::decode(&self.bytes).expect("stored hex")).expect("stored envelope parses") {
+        match Envelope::parse(&hex::decode(&self.bytes).expect("stored hex"))
+            .expect("stored envelope parses")
+        {
             Some(Envelope::Transfer(t)) => t,
             _ => unreachable!("stored transfer event holds a transfer"),
         }
@@ -66,7 +73,9 @@ impl AcceptedTransfer {
 
 impl AcceptedMint {
     pub fn envelope(&self) -> MintEnvelope {
-        match Envelope::parse(&hex::decode(&self.bytes).expect("stored hex")).expect("stored envelope parses") {
+        match Envelope::parse(&hex::decode(&self.bytes).expect("stored hex"))
+            .expect("stored envelope parses")
+        {
             Some(Envelope::Mint(m)) => m,
             _ => unreachable!("stored mint event holds a mint"),
         }
@@ -143,7 +152,9 @@ impl State {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let f: StateFile = serde_json::from_reader(std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?)?;
+        let f: StateFile = serde_json::from_reader(
+            std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?,
+        )?;
         let mut tree = MerkleTree::new();
         for l in &f.leaves {
             tree.append(keys::fr_from_bytes(&hex::decode(l)?).context("bad leaf")?);
@@ -152,8 +163,24 @@ impl State {
             deployment: f.deployment,
             replayed_height: f.replayed_height,
             tree,
-            nullifiers: f.nullifiers.iter().map(|h| keys::fr_from_bytes(&hex::decode(h).unwrap_or_default()).context("bad nullifier")).collect::<Result<_>>()?,
-            roots: f.roots.iter().map(|(h, r)| Ok((*h, keys::fr_from_bytes(&hex::decode(r)?).context("bad root")?))).collect::<Result<_>>()?,
+            nullifiers: f
+                .nullifiers
+                .iter()
+                .map(|h| {
+                    keys::fr_from_bytes(&hex::decode(h).unwrap_or_default())
+                        .context("bad nullifier")
+                })
+                .collect::<Result<_>>()?,
+            roots: f
+                .roots
+                .iter()
+                .map(|(h, r)| {
+                    Ok((
+                        *h,
+                        keys::fr_from_bytes(&hex::decode(r)?).context("bad root")?,
+                    ))
+                })
+                .collect::<Result<_>>()?,
             block_hashes: f.block_hashes.into_iter().collect(),
             events: f.events,
             rejections: f.rejections,
@@ -164,9 +191,22 @@ impl State {
         let f = StateFile {
             deployment: self.deployment.clone(),
             replayed_height: self.replayed_height,
-            leaves: self.tree.leaves().iter().map(|l| hex::encode(keys::fr_to_bytes(l))).collect(),
-            nullifiers: self.nullifiers.iter().map(|n| hex::encode(keys::fr_to_bytes(n))).collect(),
-            roots: self.roots.iter().map(|(h, r)| (*h, hex::encode(keys::fr_to_bytes(r)))).collect(),
+            leaves: self
+                .tree
+                .leaves()
+                .iter()
+                .map(|l| hex::encode(keys::fr_to_bytes(l)))
+                .collect(),
+            nullifiers: self
+                .nullifiers
+                .iter()
+                .map(|n| hex::encode(keys::fr_to_bytes(n)))
+                .collect(),
+            roots: self
+                .roots
+                .iter()
+                .map(|(h, r)| (*h, hex::encode(keys::fr_to_bytes(r))))
+                .collect(),
             block_hashes: self.block_hashes.iter().map(|(h, b)| (*h, *b)).collect(),
             events: self.events.clone(),
             rejections: self.rejections.clone(),
@@ -184,7 +224,10 @@ impl State {
         let tip = e.tip_height()?;
         if let Some(h) = self.block_hashes.get(&self.replayed_height).copied() {
             if e.block_hash(self.replayed_height)? != h {
-                eprintln!("reorganisation at or below {}: replaying from activation", self.replayed_height);
+                eprintln!(
+                    "reorganisation at or below {}: replaying from activation",
+                    self.replayed_height
+                );
                 *self = Self::fresh(self.deployment.clone());
             }
         }
@@ -206,11 +249,18 @@ impl State {
         for txid in e.block_txids(h)? {
             txs.push((txid, e.transaction(&txid)?));
         }
-        ensure!(e.block_hash(h)? == hash, "block {h} changed while it was being fetched");
+        ensure!(
+            e.block_hash(h)? == hash,
+            "block {h} changed while it was being fetched"
+        );
         let vault = self.deployment.vault_spk()?;
         for (txid, tx) in &txs {
             if let Err(reason) = self.replay_tx(params, h, *txid, tx, &vault) {
-                self.rejections.push(Rejection { txid: *txid, height: h, reason: reason.to_string() });
+                self.rejections.push(Rejection {
+                    txid: *txid,
+                    height: h,
+                    reason: reason.to_string(),
+                });
             }
         }
         self.roots.insert(h, self.tree.root());
@@ -218,7 +268,8 @@ impl State {
         self.replayed_height = h;
         // Keep a little more root history than the window needs.
         let keep_from = h.saturating_sub(WINDOW_W + 10);
-        self.roots.retain(|k, _| *k >= keep_from || *k == self.deployment.activation - 1);
+        self.roots
+            .retain(|k, _| *k >= keep_from || *k == self.deployment.activation - 1);
         self.block_hashes.retain(|k, _| *k >= keep_from);
         let excess = self.rejections.len().saturating_sub(MAX_REJECTIONS);
         self.rejections.drain(..excess);
@@ -227,13 +278,27 @@ impl State {
 
     /// One transaction of block `h`. Ok when it carries no envelope or the
     /// envelope was accepted; Err with the reason to record otherwise.
-    pub fn replay_tx(&mut self, params: &Params, h: u32, txid: Txid, tx: &Transaction, vault: &ScriptBuf) -> std::result::Result<(), RejectReason> {
-        let Some(payload) = op_return_payload(tx).map_err(RejectReason::Carrier)? else { return Ok(()) };
+    pub fn replay_tx(
+        &mut self,
+        params: &Params,
+        h: u32,
+        txid: Txid,
+        tx: &Transaction,
+        vault: &ScriptBuf,
+    ) -> std::result::Result<(), RejectReason> {
+        let Some(payload) = op_return_payload(tx).map_err(RejectReason::Carrier)? else {
+            return Ok(());
+        };
         match Envelope::parse(&payload).map_err(|e| RejectReason::Parse(e.to_string()))? {
             None => Ok(()),
             Some(Envelope::Transfer(t)) => self.accept_transfer(params, h, txid, &t, &payload),
             Some(Envelope::Mint(m)) => {
-                let value = tx.output.iter().filter(|o| o.script_pubkey == *vault).map(|o| o.value.to_sat()).sum();
+                let value = tx
+                    .output
+                    .iter()
+                    .filter(|o| o.script_pubkey == *vault)
+                    .map(|o| o.value.to_sat())
+                    .sum();
                 self.accept_mint(h, txid, &m, &payload, value)
             }
         }
@@ -241,12 +306,25 @@ impl State {
 
     /// Paper A.7 order: parse (done), binding, anchor window, nullifiers,
     /// proof, then mutate.
-    fn accept_transfer(&mut self, params: &Params, h: u32, txid: Txid, t: &TransferEnvelope, payload: &[u8]) -> std::result::Result<(), RejectReason> {
+    fn accept_transfer(
+        &mut self,
+        params: &Params,
+        h: u32,
+        txid: Txid,
+        t: &TransferEnvelope,
+        payload: &[u8],
+    ) -> std::result::Result<(), RejectReason> {
         let (anchor, height) = (u64::from(t.h_anchor), u64::from(h));
         if anchor + u64::from(WINDOW_W) < height || anchor + u64::from(K_MIN) > height {
-            return Err(RejectReason::AnchorOutsideWindow { anchor: t.h_anchor, height: h });
+            return Err(RejectReason::AnchorOutsideWindow {
+                anchor: t.h_anchor,
+                height: h,
+            });
         }
-        let r_anchor = *self.roots.get(&t.h_anchor).ok_or(RejectReason::NoRetainedRoot(t.h_anchor))?;
+        let r_anchor = *self
+            .roots
+            .get(&t.h_anchor)
+            .ok_or(RejectReason::NoRetainedRoot(t.h_anchor))?;
         if t.nf[0] == t.nf[1] {
             return Err(RejectReason::DuplicateNullifier);
         }
@@ -255,28 +333,53 @@ impl State {
                 return Err(RejectReason::NullifierSpent(*nf));
             }
         }
-        let public = crate::circuit::PublicInputs { r_anchor, digest: t.statement_digest() };
+        let public = crate::circuit::PublicInputs {
+            r_anchor,
+            digest: t.statement_digest(),
+        };
         if !params.verify(&public, &t.proof) {
             return Err(RejectReason::ProofInvalid);
         }
         let h_body = t.h_body();
         let mut positions = [0u64; N_OUT];
         for j in 0..N_OUT {
-            positions[j] = self.tree.append(note::leaf(&h_body, j as u8, &t.pk_eph[j], &t.ct[j]));
+            positions[j] = self
+                .tree
+                .append(note::leaf(&h_body, j as u8, &t.pk_eph[j], &t.ct[j]));
         }
         for nf in &t.nf {
             self.nullifiers.insert(*nf);
         }
-        self.events.push(Event::Transfer(AcceptedTransfer { txid, height: h, bytes: hex::encode(payload), positions }));
+        self.events.push(Event::Transfer(AcceptedTransfer {
+            txid,
+            height: h,
+            bytes: hex::encode(payload),
+            positions,
+        }));
         Ok(())
     }
 
-    fn accept_mint(&mut self, h: u32, txid: Txid, m: &MintEnvelope, payload: &[u8], value: u64) -> std::result::Result<(), RejectReason> {
+    fn accept_mint(
+        &mut self,
+        h: u32,
+        txid: Txid,
+        m: &MintEnvelope,
+        payload: &[u8],
+        value: u64,
+    ) -> std::result::Result<(), RejectReason> {
         if value == 0 {
             return Err(RejectReason::MintUnfunded);
         }
-        let pos = self.tree.append(note::mint_leaf(value, &m.d, &m.pk_d, &m.r_seed));
-        self.events.push(Event::Mint(AcceptedMint { txid, height: h, bytes: hex::encode(payload), value, pos }));
+        let pos = self
+            .tree
+            .append(note::mint_leaf(value, &m.d, &m.pk_d, &m.r_seed));
+        self.events.push(Event::Mint(AcceptedMint {
+            txid,
+            height: h,
+            bytes: hex::encode(payload),
+            value,
+            pos,
+        }));
         Ok(())
     }
 }

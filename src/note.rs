@@ -5,10 +5,18 @@
 //! the key and the ciphertext, which is what the paper's A6 asks for and
 //! what a plain AEAD does not give.
 
-use crate::keys::{self, DIVERSIFIER_LEN};
-use crate::poseidon::{self, tag};
-use crate::{EdwardsAffine, Fr, Fs};
+use crate::{
+    EdwardsAffine, Fr, Fs,
+    keys::{self, DIVERSIFIER_LEN},
+    poseidon::{self, tag},
+};
 use ark_ff::{BigInteger, PrimeField};
+use chacha20poly1305::{
+    ChaCha20Poly1305,
+    aead::{Aead, KeyInit, Payload},
+};
+use hkdf::Hkdf;
+use sha2::Sha256;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NotePlaintext {
@@ -101,7 +109,10 @@ pub fn encrypt(note: &NotePlaintext, pk_d: &EdwardsAffine) -> Option<(EdwardsAff
     let pk_eph = keys::mul(&g_d, &s);
     let shared = keys::mul(pk_d, &s);
     let key = note_key(&shared, &pk_eph);
-    Some((pk_eph, encrypt_with_key(&key, &pack_vd(note.v, &note.d), &note.r_seed)))
+    Some((
+        pk_eph,
+        encrypt_with_key(&key, &pack_vd(note.v, &note.d), &note.r_seed),
+    ))
 }
 
 fn decrypt_with_key(key: &Fr, ct: &Ciphertext) -> Option<NotePlaintext> {
@@ -116,7 +127,11 @@ fn decrypt_with_key(key: &Fr, ct: &Ciphertext) -> Option<NotePlaintext> {
 
 /// Recipient side (paper 16.1), including the post-decryption checks:
 /// re-derive sk_eph from r_seed and require pk_eph == [sk_eph] G_d.
-pub fn decrypt_as_recipient(ct: &Ciphertext, pk_eph: &EdwardsAffine, sk_view: &Fs) -> Option<NotePlaintext> {
+pub fn decrypt_as_recipient(
+    ct: &Ciphertext,
+    pk_eph: &EdwardsAffine,
+    sk_view: &Fs,
+) -> Option<NotePlaintext> {
     let shared = keys::mul(pk_eph, sk_view);
     let note = decrypt_with_key(&note_key(&shared, pk_eph), ct)?;
     let g_d = keys::diversify_hash(&note.d)?.base;
@@ -124,7 +139,12 @@ pub fn decrypt_as_recipient(ct: &Ciphertext, pk_eph: &EdwardsAffine, sk_view: &F
 }
 
 /// Sender recovery (paper 16.2) given the (pk_d, sk_eph) record.
-pub fn decrypt_as_sender(ct: &Ciphertext, pk_eph: &EdwardsAffine, pk_d: &EdwardsAffine, s: &Fs) -> Option<NotePlaintext> {
+pub fn decrypt_as_sender(
+    ct: &Ciphertext,
+    pk_eph: &EdwardsAffine,
+    pk_d: &EdwardsAffine,
+    s: &Fs,
+) -> Option<NotePlaintext> {
     let shared = keys::mul(pk_d, s);
     let note = decrypt_with_key(&note_key(&shared, pk_eph), ct)?;
     let g_d = keys::diversify_hash(&note.d)?.base;
@@ -134,13 +154,33 @@ pub fn decrypt_as_sender(ct: &Ciphertext, pk_eph: &EdwardsAffine, pk_d: &Edwards
 /// Ciphertext-derived leaf (paper section 9). h_aux is fixed to null and
 /// not serialised, as in the paper's current version.
 pub fn leaf(h_body: &Fr, j: u8, pk_eph: &EdwardsAffine, ct: &Ciphertext) -> Fr {
-    poseidon::hash(tag::LEAF, &[*h_body, Fr::from(j as u64), pk_eph.x, pk_eph.y, ct.c0, ct.c1, ct.tag])
+    poseidon::hash(
+        tag::LEAF,
+        &[
+            *h_body,
+            Fr::from(j as u64),
+            pk_eph.x,
+            pk_eph.y,
+            ct.c0,
+            ct.c1,
+            ct.tag,
+        ],
+    )
 }
 
 /// Peg-in leaf. Outside the paper: a mint publishes the note in plaintext
 /// because there is no proof that a ciphertext encrypts the deposited value.
 pub fn mint_leaf(v: u64, d: &[u8; DIVERSIFIER_LEN], pk_d: &EdwardsAffine, r_seed: &Fr) -> Fr {
-    poseidon::hash(tag::MINT_LEAF, &[Fr::from(v), keys::diversifier_to_field(d), pk_d.x, pk_d.y, *r_seed])
+    poseidon::hash(
+        tag::MINT_LEAF,
+        &[
+            Fr::from(v),
+            keys::diversifier_to_field(d),
+            pk_d.x,
+            pk_d.y,
+            *r_seed,
+        ],
+    )
 }
 
 pub fn nullifier(sk_nf: &Fr, rho: &Fr, pos: u64) -> Fr {
@@ -156,12 +196,25 @@ mod tests {
     fn encrypt_decrypt_both_sides() {
         let bob = WalletKeys::from_seed([1u8; 32]);
         let addr = bob.address(3);
-        let note = NotePlaintext { v: 123_456, d: addr.d, r_seed: Fr::from(99u64) };
+        let note = NotePlaintext {
+            v: 123_456,
+            d: addr.d,
+            r_seed: Fr::from(99u64),
+        };
         let (pk_eph, ct) = encrypt(&note, &addr.pk_d).unwrap();
-        assert_eq!(decrypt_as_recipient(&ct, &pk_eph, &bob.derive().sk_view), Some(note.clone()));
-        assert_eq!(decrypt_as_sender(&ct, &pk_eph, &addr.pk_d, &sk_eph(&note.r_seed)), Some(note.clone()));
+        assert_eq!(
+            decrypt_as_recipient(&ct, &pk_eph, &bob.derive().sk_view),
+            Some(note.clone())
+        );
+        assert_eq!(
+            decrypt_as_sender(&ct, &pk_eph, &addr.pk_d, &sk_eph(&note.r_seed)),
+            Some(note.clone())
+        );
         let other = WalletKeys::from_seed([2u8; 32]);
-        assert_eq!(decrypt_as_recipient(&ct, &pk_eph, &other.derive().sk_view), None);
+        assert_eq!(
+            decrypt_as_recipient(&ct, &pk_eph, &other.derive().sk_view),
+            None
+        );
         assert_eq!(Ciphertext::from_bytes(&ct.to_bytes()), Some(ct));
     }
 
@@ -173,38 +226,64 @@ mod tests {
 }
 
 fn recovery_key(vk_out: &[u8; 32], binding: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
     let hk = Hkdf::<Sha256>::new(Some(binding), vk_out);
     let mut key = [0u8; 32];
     let mut nonce = [0u8; 12];
     hk.expand(b"sbp/ctout/key", &mut key).expect("valid length");
-    hk.expand(b"sbp/ctout/nonce", &mut nonce).expect("valid length");
+    hk.expand(b"sbp/ctout/nonce", &mut nonce)
+        .expect("valid length");
     (key, nonce)
 }
 
 /// Sender-recovery ciphertext ct_out (paper 16.2): the (pk_d, sk_eph) record
 /// of every output under ChaCha20-Poly1305, keyed from vk_out and the
 /// recovery binding, which is also the associated data.
-pub fn encrypt_recovery(records: &[(EdwardsAffine, Fs)], binding: &[u8; 32], vk_out: &[u8; 32]) -> Vec<u8> {
-    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::ChaCha20Poly1305;
+pub fn encrypt_recovery(
+    records: &[(EdwardsAffine, Fs)],
+    binding: &[u8; 32],
+    vk_out: &[u8; 32],
+) -> Vec<u8> {
     let (key, nonce) = recovery_key(vk_out, binding);
     let mut pt = Vec::with_capacity(records.len() * 64);
     for (pk_d, s) in records {
         pt.extend_from_slice(&keys::point_to_bytes(pk_d));
         pt.extend_from_slice(&s.into_bigint().to_bytes_le());
     }
-    ChaCha20Poly1305::new((&key).into()).encrypt((&nonce).into(), Payload { msg: &pt, aad: binding }).expect("aead")
+    ChaCha20Poly1305::new((&key).into())
+        .encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: &pt,
+                aad: binding,
+            },
+        )
+        .expect("aead")
 }
 
-pub fn decrypt_recovery(ct_out: &[u8], binding: &[u8; 32], vk_out: &[u8; 32]) -> Option<Vec<(EdwardsAffine, Fs)>> {
-    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-    use chacha20poly1305::ChaCha20Poly1305;
+pub fn decrypt_recovery(
+    ct_out: &[u8],
+    binding: &[u8; 32],
+    vk_out: &[u8; 32],
+) -> Option<Vec<(EdwardsAffine, Fs)>> {
     let (key, nonce) = recovery_key(vk_out, binding);
-    let pt = ChaCha20Poly1305::new((&key).into()).decrypt((&nonce).into(), Payload { msg: ct_out, aad: binding }).ok()?;
+    let pt = ChaCha20Poly1305::new((&key).into())
+        .decrypt(
+            (&nonce).into(),
+            Payload {
+                msg: ct_out,
+                aad: binding,
+            },
+        )
+        .ok()?;
     if pt.len() % 64 != 0 {
         return None;
     }
-    pt.chunks(64).map(|c| Some((keys::point_from_bytes(&c[..32])?, Fs::from_le_bytes_mod_order(&c[32..])))).collect()
+    pt.chunks(64)
+        .map(|c| {
+            Some((
+                keys::point_from_bytes(&c[..32])?,
+                Fs::from_le_bytes_mod_order(&c[32..]),
+            ))
+        })
+        .collect()
 }

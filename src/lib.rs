@@ -8,15 +8,15 @@
 //! the paper leaves open is instantiated with Poseidon over BLS12-381 Fr.
 //! See PROFILE.md for every deviation from the paper.
 
-pub mod poseidon;
+pub mod chain;
+pub mod circuit;
+pub mod envelope;
+pub mod indexer;
 pub mod keys;
 pub mod note;
-pub mod tree;
-pub mod envelope;
-pub mod circuit;
+pub mod poseidon;
 pub mod prover;
-pub mod chain;
-pub mod indexer;
+pub mod tree;
 pub mod wallet;
 
 pub use ark_bls12_381::Fr;

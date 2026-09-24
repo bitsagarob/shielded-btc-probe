@@ -1,11 +1,14 @@
 //! Transfer and mint envelopes, canonical serialisation, h_body and the
 //! public statement digest (paper sections 11, 13, A.3, A.5).
 
-use crate::keys::{self, DIVERSIFIER_LEN};
-use crate::note::{Ciphertext, CIPHERTEXT_LEN};
-use crate::poseidon::{self, tag};
-use crate::{EdwardsAffine, Fr, N_IN, N_OUT};
-use anyhow::{bail, ensure, Result};
+use crate::{
+    EdwardsAffine, Fr, N_IN, N_OUT,
+    keys::{self, DIVERSIFIER_LEN},
+    note::{CIPHERTEXT_LEN, Ciphertext},
+    poseidon::{self, tag},
+};
+use anyhow::{Result, bail, ensure};
+use sha2::{Digest, Sha256};
 
 pub const MAGIC: &[u8; 3] = b"sbp";
 pub const VERSION: u8 = 1;
@@ -103,7 +106,12 @@ impl TransferEnvelope {
     }
 }
 
-pub fn statement_digest(h_body: &Fr, nf: &[Fr; N_IN], pk_eph: &[EdwardsAffine; N_OUT], ct: &[Ciphertext; N_OUT]) -> Fr {
+pub fn statement_digest(
+    h_body: &Fr,
+    nf: &[Fr; N_IN],
+    pk_eph: &[EdwardsAffine; N_OUT],
+    ct: &[Ciphertext; N_OUT],
+) -> Fr {
     let mut inputs = vec![*h_body, Fr::from(N_IN as u64), Fr::from(N_OUT as u64)];
     inputs.extend_from_slice(nf);
     for pk in pk_eph {
@@ -117,7 +125,6 @@ pub fn statement_digest(h_body: &Fr, nf: &[Fr; N_IN], pk_eph: &[EdwardsAffine; N
 }
 
 pub fn recovery_binding(pk_eph: &[EdwardsAffine; N_OUT], ct: &[Ciphertext; N_OUT]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update([N_OUT as u8]);
     for pk in pk_eph {
@@ -165,15 +172,22 @@ impl Envelope {
                 ensure!(r.take(1)?[0] as usize == N_OUT, "unsupported output count");
                 let mut nf = [Fr::from(0u64); N_IN];
                 for x in nf.iter_mut() {
-                    *x = keys::fr_from_bytes(r.take(32)?).ok_or_else(|| anyhow::anyhow!("non-canonical nullifier"))?;
+                    *x = keys::fr_from_bytes(r.take(32)?)
+                        .ok_or_else(|| anyhow::anyhow!("non-canonical nullifier"))?;
                 }
                 let mut pk_eph = [EdwardsAffine::default(); N_OUT];
                 for x in pk_eph.iter_mut() {
-                    *x = keys::point_from_bytes(r.take(32)?).ok_or_else(|| anyhow::anyhow!("bad pk_eph"))?;
+                    *x = keys::point_from_bytes(r.take(32)?)
+                        .ok_or_else(|| anyhow::anyhow!("bad pk_eph"))?;
                 }
-                let mut ct = [Ciphertext { c0: Fr::from(0u64), c1: Fr::from(0u64), tag: Fr::from(0u64) }; N_OUT];
+                let mut ct = [Ciphertext {
+                    c0: Fr::from(0u64),
+                    c1: Fr::from(0u64),
+                    tag: Fr::from(0u64),
+                }; N_OUT];
                 for x in ct.iter_mut() {
-                    *x = Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?).ok_or_else(|| anyhow::anyhow!("bad ciphertext"))?;
+                    *x = Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?)
+                        .ok_or_else(|| anyhow::anyhow!("bad ciphertext"))?;
                 }
                 let ct_out = r.take(CT_OUT_LEN)?.to_vec();
                 let plen = r.take(1)?[0] as usize;
@@ -183,16 +197,29 @@ impl Envelope {
                     ensure!(plen > 8, "payout too short");
                     let amount = u64::from_le_bytes(r.take(8)?.try_into().unwrap());
                     let script_pubkey = r.take(plen - 8)?.to_vec();
-                    Some(Payout { amount, script_pubkey })
+                    Some(Payout {
+                        amount,
+                        script_pubkey,
+                    })
                 };
                 let proof = r.take(PROOF_LEN)?.to_vec();
-                Envelope::Transfer(TransferEnvelope { h_anchor, nf, pk_eph, ct, ct_out, payout, proof })
+                Envelope::Transfer(TransferEnvelope {
+                    h_anchor,
+                    nf,
+                    pk_eph,
+                    ct,
+                    ct_out,
+                    payout,
+                    proof,
+                })
             }
             KIND_MINT => {
                 let mut d = [0u8; DIVERSIFIER_LEN];
                 d.copy_from_slice(r.take(DIVERSIFIER_LEN)?);
-                let pk_d = keys::point_from_bytes(r.take(32)?).ok_or_else(|| anyhow::anyhow!("bad pk_d"))?;
-                let r_seed = keys::fr_from_bytes(r.take(32)?).ok_or_else(|| anyhow::anyhow!("non-canonical r_seed"))?;
+                let pk_d = keys::point_from_bytes(r.take(32)?)
+                    .ok_or_else(|| anyhow::anyhow!("bad pk_d"))?;
+                let r_seed = keys::fr_from_bytes(r.take(32)?)
+                    .ok_or_else(|| anyhow::anyhow!("non-canonical r_seed"))?;
                 Envelope::Mint(MintEnvelope { d, pk_d, r_seed })
             }
             k => bail!("unknown envelope kind {k:#x}"),
@@ -219,14 +246,20 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::WalletKeys;
-    use crate::note::{encrypt, NotePlaintext};
+    use crate::{
+        keys::WalletKeys,
+        note::{NotePlaintext, encrypt},
+    };
 
     #[test]
     fn transfer_roundtrip_and_size() {
         let w = WalletKeys::from_seed([3u8; 32]);
         let a = w.address(0);
-        let n = NotePlaintext { v: 5, d: a.d, r_seed: Fr::from(8u64) };
+        let n = NotePlaintext {
+            v: 5,
+            d: a.d,
+            r_seed: Fr::from(8u64),
+        };
         let (pk, ct) = encrypt(&n, &a.pk_d).unwrap();
         let env = TransferEnvelope {
             h_anchor: 42,
@@ -238,8 +271,14 @@ mod tests {
             proof: vec![0u8; PROOF_LEN],
         };
         let bytes = env.to_bytes();
-        assert_eq!(bytes.len(), 6 + 4 + 2 + 64 + 64 + 192 + CT_OUT_LEN + 1 + PROOF_LEN);
-        assert_eq!(Envelope::parse(&bytes).unwrap(), Some(Envelope::Transfer(env.clone())));
+        assert_eq!(
+            bytes.len(),
+            6 + 4 + 2 + 64 + 64 + 192 + CT_OUT_LEN + 1 + PROOF_LEN
+        );
+        assert_eq!(
+            Envelope::parse(&bytes).unwrap(),
+            Some(Envelope::Transfer(env.clone()))
+        );
         let mut bad = bytes.clone();
         bad.push(0);
         assert!(Envelope::parse(&bad).is_err());

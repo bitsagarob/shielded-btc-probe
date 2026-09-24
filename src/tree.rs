@@ -1,7 +1,9 @@
 //! Append-only Poseidon Merkle tree of note leaves (paper section 8).
 
-use crate::poseidon::{self, tag};
-use crate::{Fr, TREE_DEPTH};
+use crate::{
+    Fr, TREE_DEPTH,
+    poseidon::{self, tag},
+};
 use std::collections::HashMap;
 
 pub fn node(l: &Fr, r: &Fr) -> Fr {
@@ -36,7 +38,11 @@ impl MerkleTree {
             let prev = empty[i - 1];
             empty.push(node(&prev, &prev));
         }
-        Self { nodes: vec![HashMap::new(); TREE_DEPTH + 1], empty, len: 0 }
+        Self {
+            nodes: vec![HashMap::new(); TREE_DEPTH + 1],
+            empty,
+            len: 0,
+        }
     }
 
     fn get(&self, level: usize, idx: u64) -> Fr {
@@ -95,7 +101,11 @@ impl MerklePath {
         let mut cur = *leaf;
         let mut idx = self.pos;
         for s in &self.siblings {
-            cur = if idx & 1 == 0 { node(&cur, s) } else { node(s, &cur) };
+            cur = if idx & 1 == 0 {
+                node(&cur, s)
+            } else {
+                node(s, &cur)
+            };
             idx >>= 1;
         }
         cur

@@ -1,15 +1,16 @@
 //! Wallet behaviour against hand-built replay state. Nothing here
 //! broadcasts; the payout test reads Fulcrum with a vault that owns nothing.
 
-use bitcoin::hashes::Hash;
-use bitcoin::Txid;
-use shielded_probe::chain::{Electrum, FundingKey, DEFAULT_ELECTRUM};
-use shielded_probe::envelope::{recovery_binding, Payout, TransferEnvelope, CT_OUT_LEN, PROOF_LEN};
-use shielded_probe::indexer::{AcceptedMint, AcceptedTransfer, Deployment, Event, State};
-use shielded_probe::keys::Address;
-use shielded_probe::note::{self, NotePlaintext};
-use shielded_probe::wallet::{validate_payout, Wallet};
-use shielded_probe::{Fr, WINDOW_W};
+use bitcoin::{Txid, hashes::Hash};
+use shielded_probe::{
+    Fr, WINDOW_W,
+    chain::{DEFAULT_ELECTRUM, Electrum, FundingKey},
+    envelope::{CT_OUT_LEN, PROOF_LEN, Payout, TransferEnvelope, recovery_binding},
+    indexer::{AcceptedMint, AcceptedTransfer, Deployment, Event, State},
+    keys::Address,
+    note::{self, NotePlaintext},
+    wallet::{Wallet, validate_payout},
+};
 use std::os::unix::fs::PermissionsExt;
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -30,29 +31,77 @@ fn fresh_state(op: &Wallet) -> State {
 fn mint_to(st: &mut State, w: &Wallet, v: u64, seed: u64, txid_byte: u8) -> u64 {
     let a = w.address();
     let r_seed = Fr::from(seed);
-    let env = shielded_probe::envelope::MintEnvelope { d: a.d, pk_d: a.pk_d, r_seed };
+    let env = shielded_probe::envelope::MintEnvelope {
+        d: a.d,
+        pk_d: a.pk_d,
+        r_seed,
+    };
     let pos = st.tree.append(note::mint_leaf(v, &a.d, &a.pk_d, &r_seed));
-    st.events.push(Event::Mint(AcceptedMint { txid: Txid::from_byte_array([txid_byte; 32]), height: 11, bytes: hex::encode(env.to_bytes()), value: v, pos }));
+    st.events.push(Event::Mint(AcceptedMint {
+        txid: Txid::from_byte_array([txid_byte; 32]),
+        height: 11,
+        bytes: hex::encode(env.to_bytes()),
+        value: v,
+        pos,
+    }));
     pos
 }
 
 /// Appends an accepted transfer. `sender` is the vk_out ct_out is written
 /// under; None leaves ct_out as junk.
-fn transfer(st: &mut State, outs: [(&Address, u64, u64); 2], sender: Option<&[u8; 32]>, nf: [Fr; 2], payout: Option<Payout>, txid_byte: u8) -> Txid {
-    let notes: Vec<NotePlaintext> = outs.iter().map(|(a, v, seed)| NotePlaintext { v: *v, d: a.d, r_seed: Fr::from(*seed) }).collect();
-    let encs: Vec<_> = notes.iter().zip(&outs).map(|(n, (a, _, _))| note::encrypt(n, &a.pk_d).unwrap()).collect();
+fn transfer(
+    st: &mut State,
+    outs: [(&Address, u64, u64); 2],
+    sender: Option<&[u8; 32]>,
+    nf: [Fr; 2],
+    payout: Option<Payout>,
+    txid_byte: u8,
+) -> Txid {
+    let notes: Vec<NotePlaintext> = outs
+        .iter()
+        .map(|(a, v, seed)| NotePlaintext {
+            v: *v,
+            d: a.d,
+            r_seed: Fr::from(*seed),
+        })
+        .collect();
+    let encs: Vec<_> = notes
+        .iter()
+        .zip(&outs)
+        .map(|(n, (a, _, _))| note::encrypt(n, &a.pk_d).unwrap())
+        .collect();
     let pk_eph = [encs[0].0, encs[1].0];
     let ct = [encs[0].1, encs[1].1];
-    let records: Vec<_> = notes.iter().zip(&outs).map(|(n, (a, _, _))| (a.pk_d, note::sk_eph(&n.r_seed))).collect();
+    let records: Vec<_> = notes
+        .iter()
+        .zip(&outs)
+        .map(|(n, (a, _, _))| (a.pk_d, note::sk_eph(&n.r_seed)))
+        .collect();
     let ct_out = match sender {
         Some(vk) => note::encrypt_recovery(&records, &recovery_binding(&pk_eph, &ct), vk),
         None => vec![9u8; CT_OUT_LEN],
     };
-    let env = TransferEnvelope { h_anchor: 10, nf, pk_eph, ct, ct_out, payout, proof: vec![0u8; PROOF_LEN] };
+    let env = TransferEnvelope {
+        h_anchor: 10,
+        nf,
+        pk_eph,
+        ct,
+        ct_out,
+        payout,
+        proof: vec![0u8; PROOF_LEN],
+    };
     let h_body = env.h_body();
-    let positions = std::array::from_fn(|j| st.tree.append(note::leaf(&h_body, j as u8, &env.pk_eph[j], &env.ct[j])));
+    let positions = std::array::from_fn(|j| {
+        st.tree
+            .append(note::leaf(&h_body, j as u8, &env.pk_eph[j], &env.ct[j]))
+    });
     let txid = Txid::from_byte_array([txid_byte; 32]);
-    st.events.push(Event::Transfer(AcceptedTransfer { txid, height: 12, bytes: hex::encode(env.to_bytes()), positions }));
+    st.events.push(Event::Transfer(AcceptedTransfer {
+        txid,
+        height: 12,
+        bytes: hex::encode(env.to_bytes()),
+        positions,
+    }));
     for n in nf {
         st.nullifiers.insert(n);
     }
@@ -163,10 +212,20 @@ fn third_party_with_vk_out_cannot_forge_sent_history() {
     let mut st = fresh_state(&op);
     let vk_out = alice.keys.derive().vk_out;
     let to = carol.address();
-    transfer(&mut st, [(&to, 1_000_000, 77), (&to, 5, 78)], Some(&vk_out), [Fr::from(1u64), Fr::from(2u64)], None, 3);
+    transfer(
+        &mut st,
+        [(&to, 1_000_000, 77), (&to, 5, 78)],
+        Some(&vk_out),
+        [Fr::from(1u64), Fr::from(2u64)],
+        None,
+        3,
+    );
     alice.scan(&st).unwrap();
     assert!(alice.file.notes.is_empty());
-    assert!(alice.file.sent.is_empty(), "sent history forged without spending a note of alice's");
+    assert!(
+        alice.file.sent.is_empty(),
+        "sent history forged without spending a note of alice's"
+    );
 }
 
 #[test]
@@ -178,12 +237,26 @@ fn own_spend_is_recorded_as_sent() {
     let pos = mint_to(&mut st, &alice, 1000, 5, 1);
     let vk_out = alice.keys.derive().vk_out;
     let (to, change) = (carol.address(), alice.address());
-    let txid = transfer(&mut st, [(&to, 600, 77), (&change, 400, 78)], Some(&vk_out), [own_nf(&alice, 5, pos), Fr::from(2u64)], None, 3);
+    let txid = transfer(
+        &mut st,
+        [(&to, 600, 77), (&change, 400, 78)],
+        Some(&vk_out),
+        [own_nf(&alice, 5, pos), Fr::from(2u64)],
+        None,
+        3,
+    );
     alice.scan(&st).unwrap();
     assert!(alice.file.notes[0].spent);
     assert_eq!(alice.balance(), 400);
     assert_eq!(alice.file.sent.len(), 2);
-    assert_eq!((alice.file.sent[0].txid, alice.file.sent[0].v, alice.file.sent[0].to.as_str()), (txid, 600, to.encode().as_str()));
+    assert_eq!(
+        (
+            alice.file.sent[0].txid,
+            alice.file.sent[0].v,
+            alice.file.sent[0].to.as_str()
+        ),
+        (txid, 600, to.encode().as_str())
+    );
     alice.scan(&st).unwrap();
     assert_eq!(alice.file.sent.len(), 2);
 }
@@ -193,13 +266,30 @@ fn burned_output_is_recorded_spent() {
     let mut op = Wallet::create(&tmp("op7")).unwrap();
     let alice = Wallet::create(&tmp("alice7")).unwrap();
     let mut st = fresh_state(&op);
-    let payout = Payout { amount: 1000, script_pubkey: alice.funding.script_pubkey().to_bytes() };
-    transfer(&mut st, [(&op.address(), 1000, 77), (&alice.address(), 0, 78)], None, [Fr::from(1u64), Fr::from(2u64)], Some(payout), 3);
+    let payout = Payout {
+        amount: 1000,
+        script_pubkey: alice.funding.script_pubkey().to_bytes(),
+    };
+    transfer(
+        &mut st,
+        [(&op.address(), 1000, 77), (&alice.address(), 0, 78)],
+        None,
+        [Fr::from(1u64), Fr::from(2u64)],
+        Some(payout),
+        3,
+    );
     assert_eq!(op.scan(&st).unwrap(), 1);
     assert!(op.file.notes[0].spent);
     assert_eq!(op.balance(), 0);
     // Without a payout the same output is ordinary income.
-    transfer(&mut st, [(&op.address(), 1000, 79), (&alice.address(), 1, 80)], None, [Fr::from(3u64), Fr::from(4u64)], None, 4);
+    transfer(
+        &mut st,
+        [(&op.address(), 1000, 79), (&alice.address(), 1, 80)],
+        None,
+        [Fr::from(3u64), Fr::from(4u64)],
+        None,
+        4,
+    );
     op.scan(&st).unwrap();
     assert_eq!(op.balance(), 1000);
 }
@@ -209,7 +299,14 @@ fn zero_value_outputs_are_skipped() {
     let op = Wallet::create(&tmp("op8")).unwrap();
     let mut alice = Wallet::create(&tmp("alice8")).unwrap();
     let mut st = fresh_state(&op);
-    transfer(&mut st, [(&alice.address(), 0, 77), (&alice.address(), 0, 78)], None, [Fr::from(1u64), Fr::from(2u64)], None, 3);
+    transfer(
+        &mut st,
+        [(&alice.address(), 0, 77), (&alice.address(), 0, 78)],
+        None,
+        [Fr::from(1u64), Fr::from(2u64)],
+        None,
+        3,
+    );
     assert_eq!(alice.scan(&st).unwrap(), 0);
     assert!(alice.file.notes.is_empty());
 }
@@ -218,7 +315,10 @@ fn zero_value_outputs_are_skipped() {
 fn wallet_file_is_private() {
     let p = tmp("perm");
     let _ = Wallet::create(&p).unwrap();
-    assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -234,9 +334,16 @@ fn older_wallet_file_gets_a_vault_key() {
     std::fs::write(&p, old).unwrap();
     let a = Wallet::open(&p).unwrap();
     assert_eq!(a.file.vault_sk.len(), 64);
-    assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     let b = Wallet::open(&p).unwrap();
-    assert_eq!(a.vault().script_pubkey(), b.vault().script_pubkey(), "vault key persisted on first open");
+    assert_eq!(
+        a.vault().script_pubkey(),
+        b.vault().script_pubkey(),
+        "vault key persisted on first open"
+    );
     assert_ne!(a.vault().script_pubkey(), a.funding.script_pubkey());
 }
 
@@ -244,7 +351,10 @@ fn older_wallet_file_gets_a_vault_key() {
 fn recovery_roundtrip() {
     let a = Wallet::create(&tmp("rec")).unwrap();
     let vk = a.keys.derive().vk_out;
-    let records = vec![(a.address().pk_d, note::sk_eph(&Fr::from(1u64))), (a.address().pk_d, note::sk_eph(&Fr::from(2u64)))];
+    let records = vec![
+        (a.address().pk_d, note::sk_eph(&Fr::from(1u64))),
+        (a.address().pk_d, note::sk_eph(&Fr::from(2u64))),
+    ];
     let binding = [7u8; 32];
     let ct = note::encrypt_recovery(&records, &binding, &vk);
     assert_eq!(ct.len(), CT_OUT_LEN);
@@ -255,18 +365,84 @@ fn recovery_roundtrip() {
 
 #[test]
 fn payout_validation() {
-    let p2wpkh = FundingKey::from_bytes(&[8u8; 32]).unwrap().script_pubkey().to_bytes();
-    assert!(validate_payout(&Payout { amount: 1000, script_pubkey: p2wpkh.clone() }, 1000).is_ok());
-    assert!(validate_payout(&Payout { amount: 1001, script_pubkey: p2wpkh.clone() }, 1000).is_err());
-    assert!(validate_payout(&Payout { amount: 545, script_pubkey: p2wpkh.clone() }, 1000).is_err());
-    assert!(validate_payout(&Payout { amount: 1000, script_pubkey: vec![] }, 1000).is_err());
-    assert!(validate_payout(&Payout { amount: 1000, script_pubkey: vec![0x51] }, 1000).is_err());
+    let p2wpkh = FundingKey::from_bytes(&[8u8; 32])
+        .unwrap()
+        .script_pubkey()
+        .to_bytes();
+    assert!(
+        validate_payout(
+            &Payout {
+                amount: 1000,
+                script_pubkey: p2wpkh.clone()
+            },
+            1000
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_payout(
+            &Payout {
+                amount: 1001,
+                script_pubkey: p2wpkh.clone()
+            },
+            1000
+        )
+        .is_err()
+    );
+    assert!(
+        validate_payout(
+            &Payout {
+                amount: 545,
+                script_pubkey: p2wpkh.clone()
+            },
+            1000
+        )
+        .is_err()
+    );
+    assert!(
+        validate_payout(
+            &Payout {
+                amount: 1000,
+                script_pubkey: vec![]
+            },
+            1000
+        )
+        .is_err()
+    );
+    assert!(
+        validate_payout(
+            &Payout {
+                amount: 1000,
+                script_pubkey: vec![0x51]
+            },
+            1000
+        )
+        .is_err()
+    );
     let mut p2wsh = vec![0x00, 0x20];
     p2wsh.extend_from_slice(&[1u8; 32]);
-    assert!(validate_payout(&Payout { amount: 1000, script_pubkey: p2wsh }, 1000).is_err());
+    assert!(
+        validate_payout(
+            &Payout {
+                amount: 1000,
+                script_pubkey: p2wsh
+            },
+            1000
+        )
+        .is_err()
+    );
     let mut p2tr = vec![0x51, 0x20];
     p2tr.extend_from_slice(&[1u8; 32]);
-    assert!(validate_payout(&Payout { amount: 1000, script_pubkey: p2tr }, 1000).is_ok());
+    assert!(
+        validate_payout(
+            &Payout {
+                amount: 1000,
+                script_pubkey: p2tr
+            },
+            1000
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -276,11 +452,51 @@ fn payouts_refuse_bad_requests_and_keep_going() {
     let mut st = fresh_state(&op);
     let spk = alice.funding.script_pubkey().to_bytes();
     let (o, a) = (op.address(), alice.address());
-    transfer(&mut st, [(&o, 1000, 1), (&a, 1, 2)], None, [Fr::from(1u64), Fr::from(2u64)], Some(Payout { amount: 100, script_pubkey: spk.clone() }), 1);
-    transfer(&mut st, [(&o, 1000, 3), (&a, 1, 4)], None, [Fr::from(3u64), Fr::from(4u64)], Some(Payout { amount: 1000, script_pubkey: vec![0x51] }), 2);
-    transfer(&mut st, [(&o, 10_000, 5), (&a, 1, 6)], None, [Fr::from(5u64), Fr::from(6u64)], Some(Payout { amount: 10_000, script_pubkey: spk.clone() }), 3);
+    transfer(
+        &mut st,
+        [(&o, 1000, 1), (&a, 1, 2)],
+        None,
+        [Fr::from(1u64), Fr::from(2u64)],
+        Some(Payout {
+            amount: 100,
+            script_pubkey: spk.clone(),
+        }),
+        1,
+    );
+    transfer(
+        &mut st,
+        [(&o, 1000, 3), (&a, 1, 4)],
+        None,
+        [Fr::from(3u64), Fr::from(4u64)],
+        Some(Payout {
+            amount: 1000,
+            script_pubkey: vec![0x51],
+        }),
+        2,
+    );
+    transfer(
+        &mut st,
+        [(&o, 10_000, 5), (&a, 1, 6)],
+        None,
+        [Fr::from(5u64), Fr::from(6u64)],
+        Some(Payout {
+            amount: 10_000,
+            script_pubkey: spk.clone(),
+        }),
+        3,
+    );
     // Paid under the old scheme, recorded by carrier txid.
-    let old = transfer(&mut st, [(&o, 10_000, 7), (&a, 1, 8)], None, [Fr::from(7u64), Fr::from(8u64)], Some(Payout { amount: 10_000, script_pubkey: spk }), 4);
+    let old = transfer(
+        &mut st,
+        [(&o, 10_000, 7), (&a, 1, 8)],
+        None,
+        [Fr::from(7u64), Fr::from(8u64)],
+        Some(Payout {
+            amount: 10_000,
+            script_pubkey: spk,
+        }),
+        4,
+    );
     op.file.paid_payouts.push(old.to_string());
     op.scan(&st).unwrap();
     assert_eq!(op.balance(), 0);
@@ -290,7 +506,11 @@ fn payouts_refuse_bad_requests_and_keep_going() {
     let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
     assert!(op.file.failed_payouts[&key(1)].contains("below dust"));
     assert!(op.file.failed_payouts[&key(3)].contains("non-standard"));
-    assert!(op.file.failed_payouts[&key(5)].contains("insufficient funds"), "vault owns nothing: {}", op.file.failed_payouts[&key(5)]);
+    assert!(
+        op.file.failed_payouts[&key(5)].contains("insufficient funds"),
+        "vault owns nothing: {}",
+        op.file.failed_payouts[&key(5)]
+    );
     assert_eq!(op.file.failed_payouts.len(), 3);
     assert_eq!(op.file.paid_payouts, vec![old.to_string()]);
     let again = Wallet::open(&op.path).unwrap();

@@ -8,13 +8,15 @@
 use crate::circuit::{PublicInputs, TransferCircuit, TransferWitness};
 use anyhow::{Context, Result};
 use ark_bls12_381::Bls12_381;
-use ark_groth16::{prepare_verifying_key, Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey};
+use ark_groth16::{
+    Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey, prepare_verifying_key,
+};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_snark::SNARK;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use std::path::Path;
-use std::time::Instant;
+use sha2::{Digest, Sha256};
+use std::{path::Path, time::Instant};
 
 pub const INSECURE_SETUP_SEED: &[u8; 32] = b"sbp-probe-insecure-toxic-waste-0";
 
@@ -27,7 +29,10 @@ pub struct Params {
 impl Params {
     pub fn setup_insecure() -> Result<Self> {
         let mut rng = ChaCha20Rng::from_seed(*INSECURE_SETUP_SEED);
-        let circuit = TransferCircuit { public: None, witness: None };
+        let circuit = TransferCircuit {
+            public: None,
+            witness: None,
+        };
         let (pk, vk) = Groth16::<Bls12_381>::circuit_specific_setup(circuit, &mut rng)
             .map_err(|e| anyhow::anyhow!("setup: {e:?}"))?;
         let pvk = prepare_verifying_key(&vk);
@@ -42,8 +47,9 @@ impl Params {
         if pk_path.exists() && vk_path.exists() {
             let pk = ProvingKey::deserialize_uncompressed_unchecked(std::fs::File::open(&pk_path)?)
                 .context("reading proving key")?;
-            let vk = VerifyingKey::deserialize_uncompressed_unchecked(std::fs::File::open(&vk_path)?)
-                .context("reading verifying key")?;
+            let vk =
+                VerifyingKey::deserialize_uncompressed_unchecked(std::fs::File::open(&vk_path)?)
+                    .context("reading verifying key")?;
             let pvk = prepare_verifying_key(&vk);
             return Ok(Self { pk, vk, pvk });
         }
@@ -57,7 +63,6 @@ impl Params {
     }
 
     pub fn vk_fingerprint(&self) -> String {
-        use sha2::{Digest, Sha256};
         let mut v = Vec::new();
         self.vk.serialize_compressed(&mut v).expect("in-memory");
         hex::encode(&Sha256::digest(&v)[..8])
@@ -66,7 +71,10 @@ impl Params {
     /// Produces the 192-byte compressed proof.
     pub fn prove(&self, public: &PublicInputs, witness: &TransferWitness) -> Result<Vec<u8>> {
         let mut rng = rand::thread_rng();
-        let circuit = TransferCircuit { public: Some(public.clone()), witness: Some(witness.clone()) };
+        let circuit = TransferCircuit {
+            public: Some(public.clone()),
+            witness: Some(witness.clone()),
+        };
         let proof = Groth16::<Bls12_381>::prove(&self.pk, circuit, &mut rng)
             .map_err(|e| anyhow::anyhow!("prove: {e:?}"))?;
         let mut out = Vec::with_capacity(192);
@@ -78,7 +86,8 @@ impl Params {
         let Ok(proof) = Proof::<Bls12_381>::deserialize_compressed(proof) else {
             return false;
         };
-        Groth16::<Bls12_381>::verify_with_processed_vk(&self.pvk, &public.to_vec(), &proof).unwrap_or(false)
+        Groth16::<Bls12_381>::verify_with_processed_vk(&self.pvk, &public.to_vec(), &proof)
+            .unwrap_or(false)
     }
 }
 

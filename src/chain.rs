@@ -2,20 +2,23 @@
 //! the carrier transaction that publishes an envelope in one OP_RETURN.
 
 use crate::envelope::MAGIC;
-use anyhow::{bail, Result};
-use bitcoin::consensus::{deserialize, serialize};
-use bitcoin::hashes::{sha256, Hash};
-use bitcoin::key::Secp256k1;
-use bitcoin::script::Instruction;
-use bitcoin::secp256k1::{Message, SecretKey};
-use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+use anyhow::{Result, bail};
 use bitcoin::{
-    absolute, transaction, Address, Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction,
-    TxIn, TxOut, Txid, Witness,
+    Address, Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction,
+    TxIn, TxOut, Txid, Witness, absolute,
+    consensus::{deserialize, serialize},
+    hashes::{Hash, sha256},
+    key::Secp256k1,
+    script::Instruction,
+    secp256k1::{Message, SecretKey},
+    sighash::{EcdsaSighashType, SighashCache},
+    transaction,
 };
-use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use serde_json::{Value, json};
+use std::{
+    io::{BufRead, BufReader, Write},
+    net::TcpStream,
+};
 
 pub const DEFAULT_ELECTRUM: &str = "127.0.0.1:50001";
 pub const NETWORK: Network = Network::Signet;
@@ -55,7 +58,11 @@ impl Electrum {
         let stream = TcpStream::connect(addr)?;
         stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
         let writer = stream.try_clone()?;
-        let mut e = Self { reader: BufReader::new(stream), writer, next_id: 0 };
+        let mut e = Self {
+            reader: BufReader::new(stream),
+            writer,
+            next_id: 0,
+        };
         e.call("server.version", json!(["shielded-probe", "1.4"]))?;
         Ok(e)
     }
@@ -80,7 +87,10 @@ impl Electrum {
             if !err.is_null() {
                 return Err(Error::Rpc {
                     code: err["code"].as_i64().unwrap_or(0),
-                    message: err["message"].as_str().map(str::to_owned).unwrap_or_else(|| err.to_string()),
+                    message: err["message"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| err.to_string()),
                 });
             }
         }
@@ -89,12 +99,19 @@ impl Electrum {
 
     pub fn tip_height(&mut self) -> Result<u32, Error> {
         let v = self.call("blockchain.headers.subscribe", json!([]))?;
-        v["height"].as_u64().map(|h| h as u32).ok_or_else(|| protocol("no height in header"))
+        v["height"]
+            .as_u64()
+            .map(|h| h as u32)
+            .ok_or_else(|| protocol("no height in header"))
     }
 
     pub fn block_hash(&mut self, height: u32) -> Result<bitcoin::BlockHash, Error> {
         let hex = self.call("blockchain.block.header", json!([height]))?;
-        let raw = hex::decode(hex.as_str().ok_or_else(|| protocol("header not a string"))?).map_err(protocol)?;
+        let raw = hex::decode(
+            hex.as_str()
+                .ok_or_else(|| protocol("header not a string"))?,
+        )
+        .map_err(protocol)?;
         let header: bitcoin::block::Header = deserialize(&raw).map_err(protocol)?;
         Ok(header.block_hash())
     }
@@ -103,9 +120,21 @@ impl Electrum {
     pub fn block_txids(&mut self, height: u32) -> Result<Vec<Txid>, Error> {
         let mut out = Vec::new();
         loop {
-            match self.call("blockchain.transaction.id_from_pos", json!([height, out.len()])) {
-                Ok(v) => out.push(v.as_str().ok_or_else(|| protocol("txid not a string"))?.parse().map_err(protocol)?),
-                Err(Error::Rpc { message, .. }) if message.starts_with("No transaction at position") => break,
+            match self.call(
+                "blockchain.transaction.id_from_pos",
+                json!([height, out.len()]),
+            ) {
+                Ok(v) => out.push(
+                    v.as_str()
+                        .ok_or_else(|| protocol("txid not a string"))?
+                        .parse()
+                        .map_err(protocol)?,
+                ),
+                Err(Error::Rpc { message, .. })
+                    if message.starts_with("No transaction at position") =>
+                {
+                    break;
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -114,21 +143,43 @@ impl Electrum {
 
     pub fn transaction(&mut self, txid: &Txid) -> Result<Transaction, Error> {
         let hex = self.call("blockchain.transaction.get", json!([txid.to_string()]))?;
-        deserialize(&hex::decode(hex.as_str().ok_or_else(|| protocol("tx not a string"))?).map_err(protocol)?).map_err(protocol)
+        deserialize(
+            &hex::decode(hex.as_str().ok_or_else(|| protocol("tx not a string"))?)
+                .map_err(protocol)?,
+        )
+        .map_err(protocol)
     }
 
     pub fn broadcast(&mut self, tx: &Transaction) -> Result<Txid, Error> {
-        let v = self.call("blockchain.transaction.broadcast", json!([hex::encode(serialize(tx))]))?;
-        v.as_str().ok_or_else(|| protocol("txid not a string"))?.parse().map_err(protocol)
+        let v = self.call(
+            "blockchain.transaction.broadcast",
+            json!([hex::encode(serialize(tx))]),
+        )?;
+        v.as_str()
+            .ok_or_else(|| protocol("txid not a string"))?
+            .parse()
+            .map_err(protocol)
     }
 
     pub fn listunspent(&mut self, spk: &ScriptBuf) -> Result<Vec<Utxo>, Error> {
-        let v = self.call("blockchain.scripthash.listunspent", json!([scripthash(spk)]))?;
-        let arr = v.as_array().ok_or_else(|| protocol("listunspent not an array"))?;
+        let v = self.call(
+            "blockchain.scripthash.listunspent",
+            json!([scripthash(spk)]),
+        )?;
+        let arr = v
+            .as_array()
+            .ok_or_else(|| protocol("listunspent not an array"))?;
         arr.iter()
             .map(|u| {
                 Ok(Utxo {
-                    outpoint: OutPoint::new(u["tx_hash"].as_str().unwrap_or_default().parse().map_err(protocol)?, u["tx_pos"].as_u64().unwrap_or(0) as u32),
+                    outpoint: OutPoint::new(
+                        u["tx_hash"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .parse()
+                            .map_err(protocol)?,
+                        u["tx_pos"].as_u64().unwrap_or(0) as u32,
+                    ),
                     value: u["value"].as_u64().unwrap_or(0),
                     height: u["height"].as_u64().unwrap_or(0) as u32,
                 })
@@ -140,10 +191,21 @@ impl Electrum {
 impl Electrum {
     /// Every txid touching a script, confirmed and mempool, oldest first.
     pub fn history(&mut self, spk: &ScriptBuf) -> Result<Vec<Txid>, Error> {
-        let v = self.call("blockchain.scripthash.get_history", json!([scripthash(spk)]))?;
-        let arr = v.as_array().ok_or_else(|| Error::Protocol("get_history not an array".into()))?;
+        let v = self.call(
+            "blockchain.scripthash.get_history",
+            json!([scripthash(spk)]),
+        )?;
+        let arr = v
+            .as_array()
+            .ok_or_else(|| Error::Protocol("get_history not an array".into()))?;
         arr.iter()
-            .map(|h| h["tx_hash"].as_str().unwrap_or_default().parse().map_err(|_| Error::Protocol("bad txid in history".into())))
+            .map(|h| {
+                h["tx_hash"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .parse()
+                    .map_err(|_| Error::Protocol("bad txid in history".into()))
+            })
             .collect()
     }
 }
@@ -163,7 +225,9 @@ pub struct FundingKey {
 
 impl FundingKey {
     pub fn from_bytes(b: &[u8; 32]) -> Result<Self> {
-        Ok(Self { sk: SecretKey::from_slice(b)? })
+        Ok(Self {
+            sk: SecretKey::from_slice(b)?,
+        })
     }
     pub fn pubkey(&self) -> CompressedPublicKey {
         let secp = Secp256k1::new();
@@ -178,12 +242,19 @@ impl FundingKey {
 
     /// Builds and signs a transaction: `extra` outputs first, then one
     /// OP_RETURN carrying `payload`, then change back to this key.
-    pub fn build_carrier(&self, utxos: &[Utxo], payload: &[u8], extra: Vec<TxOut>) -> Result<Transaction> {
+    pub fn build_carrier(
+        &self,
+        utxos: &[Utxo],
+        payload: &[u8],
+        extra: Vec<TxOut>,
+    ) -> Result<Transaction> {
         let spk = self.script_pubkey();
         let extra_total: u64 = extra.iter().map(|o| o.value.to_sat()).sum();
         let op_return = TxOut {
             value: Amount::ZERO,
-            script_pubkey: ScriptBuf::new_op_return(bitcoin::script::PushBytesBuf::try_from(payload.to_vec())?),
+            script_pubkey: ScriptBuf::new_op_return(bitcoin::script::PushBytesBuf::try_from(
+                payload.to_vec(),
+            )?),
         };
         // Two passes: size with a zero fee, then re-sign with the real fee.
         let mut fee = 0u64;
@@ -198,13 +269,19 @@ impl FundingKey {
                 }
             }
             if total < extra_total + fee {
-                bail!("insufficient funds: have {total} sat, need {} sat", extra_total + fee);
+                bail!(
+                    "insufficient funds: have {total} sat, need {} sat",
+                    extra_total + fee
+                );
             }
             let mut outputs = extra.clone();
             outputs.push(op_return.clone());
             let change = total - extra_total - fee;
             if change >= 546 {
-                outputs.push(TxOut { value: Amount::from_sat(change), script_pubkey: spk.clone() });
+                outputs.push(TxOut {
+                    value: Amount::from_sat(change),
+                    script_pubkey: spk.clone(),
+                });
             }
             let mut tx = Transaction {
                 version: transaction::Version::TWO,
@@ -237,9 +314,17 @@ impl FundingKey {
         let mut cache = SighashCache::new(tx.clone());
         let mut witnesses = Vec::with_capacity(spent.len());
         for (i, u) in spent.iter().enumerate() {
-            let sighash = cache.p2wpkh_signature_hash(i, &spk, Amount::from_sat(u.value), EcdsaSighashType::All)?;
+            let sighash = cache.p2wpkh_signature_hash(
+                i,
+                &spk,
+                Amount::from_sat(u.value),
+                EcdsaSighashType::All,
+            )?;
             let sig = secp.sign_ecdsa(&Message::from_digest(sighash.to_byte_array()), &self.sk);
-            let sig = bitcoin::ecdsa::Signature { signature: sig, sighash_type: EcdsaSighashType::All };
+            let sig = bitcoin::ecdsa::Signature {
+                signature: sig,
+                sighash_type: EcdsaSighashType::All,
+            };
             witnesses.push(Witness::p2wpkh(&sig, &self.pubkey().0));
         }
         for (i, w) in witnesses.into_iter().enumerate() {
@@ -253,13 +338,26 @@ impl FundingKey {
 /// envelope, Err when an OP_RETURN starts with the magic but the carrier is
 /// not exactly one output holding one minimal push.
 pub fn op_return_payload(tx: &Transaction) -> Result<Option<Vec<u8>>, &'static str> {
-    let outs: Vec<&ScriptBuf> = tx.output.iter().map(|o| &o.script_pubkey).filter(|s| s.is_op_return()).collect();
-    let claims = outs
+    let outs: Vec<&ScriptBuf> = tx
+        .output
         .iter()
-        .any(|s| s.instructions().nth(1).and_then(|i| i.ok()).and_then(|i| i.push_bytes().map(|p| p.as_bytes().starts_with(MAGIC))).unwrap_or(false));
+        .map(|o| &o.script_pubkey)
+        .filter(|s| s.is_op_return())
+        .collect();
+    let claims = outs.iter().any(|s| {
+        s.instructions()
+            .nth(1)
+            .and_then(|i| i.ok())
+            .and_then(|i| i.push_bytes().map(|p| p.as_bytes().starts_with(MAGIC)))
+            .unwrap_or(false)
+    });
     let fault = |why| if claims { Err(why) } else { Ok(None) };
     let [s] = outs[..] else {
-        return if outs.is_empty() { Ok(None) } else { fault("more than one OP_RETURN output") };
+        return if outs.is_empty() {
+            Ok(None)
+        } else {
+            fault("more than one OP_RETURN output")
+        };
     };
     let mut instr = s.instructions_minimal().skip(1);
     let payload = match instr.next() {
@@ -292,7 +390,11 @@ mod tests {
     #[test]
     fn op_return_extraction() {
         let k = FundingKey::from_bytes(&[9u8; 32]).unwrap();
-        let utxos = vec![Utxo { outpoint: OutPoint::new(Txid::all_zeros(), 0), value: 100_000, height: 1 }];
+        let utxos = vec![Utxo {
+            outpoint: OutPoint::new(Txid::all_zeros(), 0),
+            value: 100_000,
+            height: 1,
+        }];
         let payload = vec![7u8; 700];
         let tx = k.build_carrier(&utxos, &payload, vec![]).unwrap();
         assert_eq!(op_return_payload(&tx), Ok(Some(payload)));

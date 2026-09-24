@@ -5,8 +5,10 @@
 //! diversified base) uses Poseidon instead, because the paper's HKDF-SHA256
 //! chain would otherwise have to be arithmetised inside the proof.
 
-use crate::poseidon::{self, tag};
-use crate::{EdwardsAffine, EdwardsProjective, Fr, Fs, DIV_HASH_TRIES};
+use crate::{
+    DIV_HASH_TRIES, EdwardsAffine, EdwardsProjective, Fr, Fs,
+    poseidon::{self, tag},
+};
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
@@ -22,7 +24,8 @@ pub const SCALAR_BITS: usize = 250;
 fn hkdf(ikm: &[u8], info: &[u8]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, ikm);
     let mut out = [0u8; 32];
-    hk.expand(info, &mut out).expect("32 bytes is a valid HKDF length");
+    hk.expand(info, &mut out)
+        .expect("32 bytes is a valid HKDF length");
     out
 }
 
@@ -57,7 +60,8 @@ pub fn scalar_from_field(x: &Fr) -> Fs {
 
 pub fn point_to_bytes(p: &EdwardsAffine) -> [u8; 32] {
     let mut v = Vec::with_capacity(32);
-    p.serialize_compressed(&mut v).expect("in-memory serialisation");
+    p.serialize_compressed(&mut v)
+        .expect("in-memory serialisation");
     let mut out = [0u8; 32];
     out.copy_from_slice(&v);
     out
@@ -121,15 +125,24 @@ pub fn diversify_hash(d: &[u8; DIVERSIFIER_LEN]) -> Option<DiversifyResult> {
         let prod = num * den;
         if let Some(x2root) = prod.sqrt() {
             // x^2 = num/den, x = sqrt(num*den)/den
-            let x = x2root * den.inverse().expect("den is never zero on a complete curve");
+            let x = x2root
+                * den
+                    .inverse()
+                    .expect("den is never zero on a complete curve");
             let x = if is_even(&x) { x } else { -x };
             roots.push(x);
             let raw = EdwardsAffine::new_unchecked(x, y);
             debug_assert!(raw.is_on_curve());
             let cleared = (raw.into_group() * Fs::from(8u64)).into_affine();
-            return Some(DiversifyResult { base: cleared, k, roots });
+            return Some(DiversifyResult {
+                base: cleared,
+                k,
+                roots,
+            });
         }
-        let w = (nonresidue() * prod).sqrt().expect("prod is a non-square so nr*prod is a square");
+        let w = (nonresidue() * prod)
+            .sqrt()
+            .expect("prod is a non-square so nr*prod is a square");
         roots.push(w);
     }
     None
@@ -168,7 +181,14 @@ impl WalletKeys {
         let sk_nf = derive_sk_nf(&sk_spend);
         let vk_in = derive_vk_in(&sk_spend);
         let sk_view = derive_sk_view(&vk_in);
-        SpendingKeys { sk_master, sk_spend, sk_nf, vk_in, sk_view, vk_out }
+        SpendingKeys {
+            sk_master,
+            sk_spend,
+            sk_nf,
+            vk_in,
+            sk_view,
+            vk_out,
+        }
     }
 
     /// Diversified payment address (d, pk_d) for a receive path index.
@@ -177,7 +197,8 @@ impl WalletKeys {
         let mut d = [0u8; DIVERSIFIER_LEN];
         let raw = hkdf(&dk, &index.to_le_bytes());
         d.copy_from_slice(&raw[..DIVERSIFIER_LEN]);
-        address_for(&self.derive(), d).expect("an own diversifier is off-curve with probability 2^-32")
+        address_for(&self.derive(), d)
+            .expect("an own diversifier is off-curve with probability 2^-32")
     }
 }
 
@@ -242,7 +263,7 @@ pub fn generator() -> EdwardsAffine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_ff::Field;
+    use rand::RngCore;
 
     #[test]
     fn seven_is_a_nonresidue() {
@@ -262,7 +283,6 @@ mod tests {
 
     #[test]
     fn random_diversifiers_all_have_a_point() {
-        use rand::RngCore;
         let mut rng = rand::thread_rng();
         for _ in 0..300 {
             let mut d = [0u8; DIVERSIFIER_LEN];

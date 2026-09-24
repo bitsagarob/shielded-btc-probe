@@ -1,22 +1,26 @@
 //! The transfer circuit (paper section 14 and appendix B), fixed at two
 //! inputs and two outputs. Public inputs: r_anchor and the statement digest.
 
-use crate::keys::{self, DiversifyResult, SCALAR_BITS};
-use crate::poseidon::{self, tag};
-use crate::tree::MerklePath;
-use crate::{EdwardsAffine, EdwardsProjective, Fr, DIV_HASH_TRIES, N_IN, N_OUT, TREE_DEPTH};
-use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
-use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
+use crate::{
+    DIV_HASH_TRIES, EdwardsAffine, EdwardsProjective, Fr, N_IN, N_OUT, TREE_DEPTH,
+    keys::{self, DiversifyResult, SCALAR_BITS},
+    note,
+    poseidon::{self, tag},
+    tree::MerklePath,
+};
+use ark_crypto_primitives::sponge::{
+    constraints::CryptographicSpongeVar, poseidon::constraints::PoseidonSpongeVar,
+};
 use ark_ed_on_bls12_381::EdwardsConfig;
 use ark_ff::{AdditiveGroup, Field};
-use ark_r1cs_std::alloc::AllocVar;
-use ark_r1cs_std::boolean::Boolean;
-use ark_r1cs_std::eq::EqGadget;
-use ark_r1cs_std::fields::fp::FpVar;
-use ark_r1cs_std::fields::FieldVar;
-use ark_r1cs_std::groups::curves::twisted_edwards::AffineVar;
-use ark_r1cs_std::groups::CurveVar;
-use ark_r1cs_std::prelude::*;
+use ark_r1cs_std::{
+    alloc::AllocVar,
+    boolean::Boolean,
+    eq::EqGadget,
+    fields::{FieldVar, fp::FpVar},
+    groups::{CurveVar, curves::twisted_edwards::AffineVar},
+    prelude::*,
+};
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 
 pub type PointVar = AffineVar<EdwardsConfig, FpVar<Fr>>;
@@ -74,7 +78,11 @@ fn missing<T: Clone>(o: &Option<T>) -> Result<T, SynthesisError> {
     o.clone().ok_or(SynthesisError::AssignmentMissing)
 }
 
-fn hash_var(cs: &ConstraintSystemRef<Fr>, t: u64, inputs: &[FpVar<Fr>]) -> Result<FpVar<Fr>, SynthesisError> {
+fn hash_var(
+    cs: &ConstraintSystemRef<Fr>,
+    t: u64,
+    inputs: &[FpVar<Fr>],
+) -> Result<FpVar<Fr>, SynthesisError> {
     let mut sponge = PoseidonSpongeVar::<Fr>::new(cs.clone(), poseidon::config());
     sponge.absorb(&FpVar::constant(Fr::from(t)))?;
     for x in inputs {
@@ -116,9 +124,17 @@ fn diversify_hash_var(
     let mut not_yet = FpVar::one();
     for t in 0..DIV_HASH_TRIES {
         let is_k = Boolean::new_witness(cs.clone(), || missing(aux).map(|a| a.k == t))?;
-        let w = FpVar::new_witness(cs.clone(), || missing(aux).map(|a| a.roots.get(t).copied().unwrap_or(Fr::ZERO)))?;
+        let w = FpVar::new_witness(cs.clone(), || {
+            missing(aux).map(|a| a.roots.get(t).copied().unwrap_or(Fr::ZERO))
+        })?;
         let inv = FpVar::new_witness(cs.clone(), || {
-            missing(aux).map(|a| if t < a.k { a.roots[t].inverse().expect("a miss root is never zero") } else { Fr::ZERO })
+            missing(aux).map(|a| {
+                if t < a.k {
+                    a.roots[t].inverse().expect("a miss root is never zero")
+                } else {
+                    Fr::ZERO
+                }
+            })
         })?;
         let is_k_f = FpVar::from(is_k.clone());
         let y_t = &h + FpVar::constant(Fr::from(t as u64));
@@ -132,7 +148,8 @@ fn diversify_hash_var(
         let hit = &w2 * &den - &num;
         let branch = (FpVar::one() - &is_k_f) * miss + &is_k_f * hit;
         (&not_yet * branch).enforce_equal(&FpVar::zero())?;
-        (&not_yet * (FpVar::one() - &is_k_f) * (&w * &inv - FpVar::one())).enforce_equal(&FpVar::zero())?;
+        (&not_yet * (FpVar::one() - &is_k_f) * (&w * &inv - FpVar::one()))
+            .enforce_equal(&FpVar::zero())?;
         x += &is_k_f * &w;
         y += &is_k_f * &y_t;
         one_hot_sum += &is_k_f;
@@ -170,12 +187,26 @@ fn encrypt_var(
     let bits = scalar_bits(&sk_eph_f)?;
     let pk_eph = mul_point(g_d, &bits)?;
     let shared = mul_point(pk_d, &bits)?;
-    let key = hash_var(cs, tag::KDF, &[shared.x.clone(), shared.y.clone(), pk_eph.x.clone(), pk_eph.y.clone()])?;
+    let key = hash_var(
+        cs,
+        tag::KDF,
+        &[
+            shared.x.clone(),
+            shared.y.clone(),
+            pk_eph.x.clone(),
+            pk_eph.y.clone(),
+        ],
+    )?;
     let m0 = v + d * FpVar::constant(Fr::from(1u128 << 64));
     let c0 = m0 + hash_var(cs, tag::STREAM, &[key.clone(), FpVar::zero()])?;
     let c1 = r_seed + hash_var(cs, tag::STREAM, &[key.clone(), FpVar::one()])?;
     let t = hash_var(cs, tag::MAC, &[key, c0.clone(), c1.clone()])?;
-    Ok(EncryptedOutput { pk_eph, c0, c1, tag: t })
+    Ok(EncryptedOutput {
+        pk_eph,
+        c0,
+        c1,
+        tag: t,
+    })
 }
 
 impl ConstraintSynthesizer<Fr> for TransferCircuit {
@@ -203,13 +234,19 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
             let enabled = Boolean::new_witness(cs.clone(), || missing(&inp).map(|x| x.enabled))?;
             let is_mint = Boolean::new_witness(cs.clone(), || missing(&inp).map(|x| x.is_mint))?;
             let v = FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| Fr::from(x.v)))?;
-            let d = FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| keys::diversifier_to_field(&x.d)))?;
+            let d = FpVar::new_witness(cs.clone(), || {
+                missing(&inp).map(|x| keys::diversifier_to_field(&x.d))
+            })?;
             let r_seed = FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| x.r_seed))?;
-            let h_body_create = FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| x.h_body_create))?;
+            let h_body_create =
+                FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| x.h_body_create))?;
             let j = FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| Fr::from(x.j as u64)))?;
-            let pos = FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| Fr::from(x.path.pos)))?;
+            let pos =
+                FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| Fr::from(x.path.pos)))?;
             let siblings: Vec<FpVar<Fr>> = (0..TREE_DEPTH)
-                .map(|l| FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| x.path.siblings[l])))
+                .map(|l| {
+                    FpVar::new_witness(cs.clone(), || missing(&inp).map(|x| x.path.siblings[l]))
+                })
                 .collect::<Result<_, _>>()?;
 
             range_check(&v, 64)?;
@@ -226,9 +263,27 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
             let ct_leaf = hash_var(
                 &cs,
                 tag::LEAF,
-                &[h_body_create, j, enc.pk_eph.x.clone(), enc.pk_eph.y.clone(), enc.c0, enc.c1, enc.tag],
+                &[
+                    h_body_create,
+                    j,
+                    enc.pk_eph.x.clone(),
+                    enc.pk_eph.y.clone(),
+                    enc.c0,
+                    enc.c1,
+                    enc.tag,
+                ],
             )?;
-            let mint_leaf = hash_var(&cs, tag::MINT_LEAF, &[v.clone(), d.clone(), pk_d.x.clone(), pk_d.y.clone(), r_seed.clone()])?;
+            let mint_leaf = hash_var(
+                &cs,
+                tag::MINT_LEAF,
+                &[
+                    v.clone(),
+                    d.clone(),
+                    pk_d.x.clone(),
+                    pk_d.y.clone(),
+                    r_seed.clone(),
+                ],
+            )?;
             let leaf = is_mint.select(&mint_leaf, &ct_leaf)?;
 
             // Block 2: Merkle membership under r_anchor, only for real inputs.
@@ -253,9 +308,13 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
         for j in 0..N_OUT {
             let out = w.as_ref().map(|w| w.outputs[j].clone());
             let v = FpVar::new_witness(cs.clone(), || missing(&out).map(|x| Fr::from(x.v)))?;
-            let d = FpVar::new_witness(cs.clone(), || missing(&out).map(|x| keys::diversifier_to_field(&x.d)))?;
+            let d = FpVar::new_witness(cs.clone(), || {
+                missing(&out).map(|x| keys::diversifier_to_field(&x.d))
+            })?;
             let r_seed = FpVar::new_witness(cs.clone(), || missing(&out).map(|x| x.r_seed))?;
-            let pk_d = PointVar::new_witness(cs.clone(), || missing(&out).map(|x| EdwardsProjective::from(x.pk_d)))?;
+            let pk_d = PointVar::new_witness(cs.clone(), || {
+                missing(&out).map(|x| EdwardsProjective::from(x.pk_d))
+            })?;
             range_check(&v, 64)?;
             range_check(&d, 88)?;
             let div_aux = out.as_ref().and_then(|x| keys::diversify_hash(&x.d));
@@ -270,7 +329,11 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
         value_in.enforce_equal(&value_out)?;
 
         // Block 8: bind everything public into the digest.
-        let mut stmt = vec![h_body, FpVar::constant(Fr::from(N_IN as u64)), FpVar::constant(Fr::from(N_OUT as u64))];
+        let mut stmt = vec![
+            h_body,
+            FpVar::constant(Fr::from(N_IN as u64)),
+            FpVar::constant(Fr::from(N_OUT as u64)),
+        ];
         stmt.extend(nullifiers);
         stmt.extend(out_pk);
         stmt.extend(out_ct);
@@ -284,22 +347,32 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
 pub struct NativeStatement {
     pub nf: [Fr; N_IN],
     pub pk_eph: [EdwardsAffine; N_OUT],
-    pub ct: [crate::note::Ciphertext; N_OUT],
+    pub ct: [note::Ciphertext; N_OUT],
 }
 
 pub fn evaluate(w: &TransferWitness) -> NativeStatement {
-    use crate::note;
     let sk_nf = keys::derive_sk_nf(&w.sk_spend);
     let nf = std::array::from_fn(|i| {
         let inp = &w.inputs[i];
         note::nullifier(&sk_nf, &note::rho(&inp.r_seed), inp.path.pos)
     });
     let mut pk_eph = [EdwardsAffine::default(); N_OUT];
-    let mut ct = [note::Ciphertext { c0: Fr::ZERO, c1: Fr::ZERO, tag: Fr::ZERO }; N_OUT];
+    let mut ct = [note::Ciphertext {
+        c0: Fr::ZERO,
+        c1: Fr::ZERO,
+        tag: Fr::ZERO,
+    }; N_OUT];
     for j in 0..N_OUT {
         let o = &w.outputs[j];
-        let (p, c) = note::encrypt(&note::NotePlaintext { v: o.v, d: o.d, r_seed: o.r_seed }, &o.pk_d)
-            .expect("output diversifiers were checked by Address::decode");
+        let (p, c) = note::encrypt(
+            &note::NotePlaintext {
+                v: o.v,
+                d: o.d,
+                r_seed: o.r_seed,
+            },
+            &o.pk_d,
+        )
+        .expect("output diversifiers were checked by Address::decode");
         pk_eph[j] = p;
         ct[j] = c;
     }
@@ -309,7 +382,6 @@ pub fn evaluate(w: &TransferWitness) -> NativeStatement {
 /// Recomputes the leaf of an input note the way the circuit does. None when
 /// d has no diversified base.
 pub fn input_leaf(sk_spend: &Fr, inp: &InputWitness) -> Option<Fr> {
-    use crate::note;
     let der_vk_in = keys::derive_vk_in(sk_spend);
     let sk_view = keys::derive_sk_view(&der_vk_in);
     let g_d = keys::diversify_hash(&inp.d)?.base;
@@ -317,7 +389,14 @@ pub fn input_leaf(sk_spend: &Fr, inp: &InputWitness) -> Option<Fr> {
     if inp.is_mint {
         Some(note::mint_leaf(inp.v, &inp.d, &pk_d, &inp.r_seed))
     } else {
-        let (pk_eph, ct) = note::encrypt(&note::NotePlaintext { v: inp.v, d: inp.d, r_seed: inp.r_seed }, &pk_d)?;
+        let (pk_eph, ct) = note::encrypt(
+            &note::NotePlaintext {
+                v: inp.v,
+                d: inp.d,
+                r_seed: inp.r_seed,
+            },
+            &pk_d,
+        )?;
         Some(note::leaf(&inp.h_body_create, inp.j, &pk_eph, &ct))
     }
 }
@@ -326,8 +405,7 @@ pub fn input_leaf(sk_spend: &Fr, inp: &InputWitness) -> Option<Fr> {
 /// one wallet (one mint, one ciphertext note) spent to two outputs.
 pub mod sample {
     use super::*;
-    use crate::keys::WalletKeys;
-    use crate::tree::MerkleTree;
+    use crate::{keys::WalletKeys, tree::MerkleTree};
 
     pub fn sample_witness() -> (TransferWitness, PublicInputs) {
         let alice = WalletKeys::from_seed([11u8; 32]);
@@ -346,7 +424,10 @@ pub mod sample {
             r_seed: Fr::from(1001u64),
             h_body_create: Fr::ZERO,
             j: 0,
-            path: MerklePath { pos: 0, siblings: vec![] },
+            path: MerklePath {
+                pos: 0,
+                siblings: vec![],
+            },
         };
         let ctn = InputWitness {
             enabled: true,
@@ -356,7 +437,10 @@ pub mod sample {
             r_seed: Fr::from(1002u64),
             h_body_create: Fr::from(555u64),
             j: 1,
-            path: MerklePath { pos: 0, siblings: vec![] },
+            path: MerklePath {
+                pos: 0,
+                siblings: vec![],
+            },
         };
         let p0 = tree.append(input_leaf(&der.sk_spend, &mint).unwrap());
         tree.append(Fr::from(4242u64)); // someone else's note
@@ -370,31 +454,52 @@ pub mod sample {
             h_body: Fr::from(777u64),
             inputs: [mint, ctn],
             outputs: [
-                OutputWitness { v: 60_000, d: b0.d, r_seed: Fr::from(2001u64), pk_d: b0.pk_d },
-                OutputWitness { v: 40_000, d: a0.d, r_seed: Fr::from(2002u64), pk_d: a0.pk_d },
+                OutputWitness {
+                    v: 60_000,
+                    d: b0.d,
+                    r_seed: Fr::from(2001u64),
+                    pk_d: b0.pk_d,
+                },
+                OutputWitness {
+                    v: 40_000,
+                    d: a0.d,
+                    r_seed: Fr::from(2002u64),
+                    pk_d: a0.pk_d,
+                },
             ],
         };
         let st = evaluate(&w);
         let digest = crate::envelope::statement_digest(&w.h_body, &st.nf, &st.pk_eph, &st.ct);
-        (w, PublicInputs { r_anchor: tree.root(), digest })
+        (
+            w,
+            PublicInputs {
+                r_anchor: tree.root(),
+                digest,
+            },
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ark_ff::Field;
-    use super::sample::sample_witness;
+    use super::{sample::sample_witness, *};
     use ark_relations::r1cs::ConstraintSystem;
 
     #[test]
     fn circuit_is_satisfied_by_native_witness() {
         let (w, p) = sample_witness();
         let cs = ConstraintSystem::<Fr>::new_ref();
-        TransferCircuit { public: Some(p.clone()), witness: Some(w.clone()) }
-            .generate_constraints(cs.clone())
-            .unwrap();
-        assert!(cs.is_satisfied().unwrap(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
+        TransferCircuit {
+            public: Some(p.clone()),
+            witness: Some(w.clone()),
+        }
+        .generate_constraints(cs.clone())
+        .unwrap();
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "unsatisfied at {:?}",
+            cs.which_is_unsatisfied()
+        );
     }
 
     #[test]
@@ -402,7 +507,12 @@ mod tests {
         let (mut w, p) = sample_witness();
         w.outputs[0].v += 1;
         let cs = ConstraintSystem::<Fr>::new_ref();
-        TransferCircuit { public: Some(p), witness: Some(w) }.generate_constraints(cs.clone()).unwrap();
+        TransferCircuit {
+            public: Some(p),
+            witness: Some(w),
+        }
+        .generate_constraints(cs.clone())
+        .unwrap();
         assert!(!cs.is_satisfied().unwrap());
     }
 
@@ -411,7 +521,12 @@ mod tests {
         let (w, mut p) = sample_witness();
         p.r_anchor += Fr::ONE;
         let cs = ConstraintSystem::<Fr>::new_ref();
-        TransferCircuit { public: Some(p), witness: Some(w) }.generate_constraints(cs.clone()).unwrap();
+        TransferCircuit {
+            public: Some(p),
+            witness: Some(w),
+        }
+        .generate_constraints(cs.clone())
+        .unwrap();
         assert!(!cs.is_satisfied().unwrap());
     }
 
@@ -420,7 +535,12 @@ mod tests {
         let (mut w, p) = sample_witness();
         w.sk_spend += Fr::ONE;
         let cs = ConstraintSystem::<Fr>::new_ref();
-        TransferCircuit { public: Some(p), witness: Some(w) }.generate_constraints(cs.clone()).unwrap();
+        TransferCircuit {
+            public: Some(p),
+            witness: Some(w),
+        }
+        .generate_constraints(cs.clone())
+        .unwrap();
         assert!(!cs.is_satisfied().unwrap());
     }
 }
