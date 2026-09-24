@@ -1,7 +1,7 @@
 //! Wallet: owned notes, scanning against replayed state, minting (peg-in),
 //! building and publishing transfers, and the operator's peg-out handler.
 
-use crate::chain::{Electrum, FundingKey, Utxo};
+use crate::chain::{op_return_payload, Electrum, FundingKey, Utxo, FEE_RATE_SAT_VB, NETWORK};
 use crate::circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness};
 use crate::envelope::{Envelope, MintEnvelope, Payout, TransferEnvelope, CT_OUT_LEN};
 use crate::indexer::{Event, State};
@@ -12,9 +12,9 @@ use crate::tree::MerklePath;
 use crate::{Fr, Fs, N_IN, N_OUT, TREE_DEPTH, WINDOW_W};
 use anyhow::{anyhow, ensure, Context, Result};
 use ark_ff::UniformRand;
-use bitcoin::{Amount, ScriptBuf, TxOut, Txid};
+use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -57,7 +57,11 @@ pub struct WalletFile {
     /// Txid of the last scanned event; a mismatch means replay history changed.
     #[serde(default)]
     pub scanned_txid: Option<Txid>,
-    pub paid_payouts: Vec<Txid>,
+    /// Peg-out requests paid, keyed by hex of nf[0] (older files hold carrier txids).
+    pub paid_payouts: Vec<String>,
+    /// Peg-out requests refused or failed, hex of nf[0] to the reason.
+    #[serde(default)]
+    pub failed_payouts: BTreeMap<String, String>,
 }
 
 pub struct Wallet {
@@ -120,6 +124,7 @@ impl Wallet {
             scanned_events: 0,
             scanned_txid: None,
             paid_payouts: vec![],
+            failed_payouts: BTreeMap::new(),
         };
         let w = Self::from_file(path.to_path_buf(), file)?;
         w.save()?;
@@ -421,37 +426,81 @@ impl Wallet {
     }
 
     /// Operator only: pay every accepted peg-out request addressed to us
-    /// that has not been paid yet. Returns the payouts made.
+    /// that has not been paid yet. The fee comes out of the request. Returns
+    /// (request txid, sat paid, payout txid) per payout made.
     pub fn process_payouts(&mut self, e: &mut Electrum, state: &State) -> Result<Vec<(Txid, u64, Txid)>> {
         let der = self.keys.derive();
+        // Payout carriers publish nf[0] in their OP_RETURN, so the chain itself
+        // says what was already paid.
+        let mut on_chain: HashSet<Vec<u8>> = HashSet::new();
+        for txid in e.history(&self.vault.script_pubkey())? {
+            if let Some(p) = op_return_payload(&e.transaction(&txid)?) {
+                on_chain.insert(p);
+            }
+        }
         let mut done = Vec::new();
         for ev in &state.events {
             let Event::Transfer(t) = ev else { continue };
-            if self.file.paid_payouts.contains(&t.txid) {
-                continue;
-            }
             let env = t.envelope();
             let Some(p) = &env.payout else { continue };
-            // Convention: the burned value is output 0, sent to the operator.
-            let Some(n) = note::decrypt_as_recipient(&env.ct[0], &env.pk_eph[0], &der.sk_view) else { continue };
-            if p.amount > n.v {
-                eprintln!("payout in {} asks {} sat but burned {} sat, skipping", t.txid, p.amount, n.v);
+            let nf = keys::fr_to_bytes(&env.nf[0]);
+            let key = hex::encode(nf);
+            if self.file.paid_payouts.contains(&key) || self.file.paid_payouts.contains(&t.txid.to_string()) || self.file.failed_payouts.contains_key(&key) {
                 continue;
             }
-            let mut utxos = e.listunspent(&self.vault.script_pubkey())?;
-            utxos.sort_by(|a, b| b.value.cmp(&a.value));
-            let tx = self.vault.build_carrier(
-                &utxos,
-                b"",
-                vec![TxOut { value: Amount::from_sat(p.amount), script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()) }],
-            )?;
-            let paid = e.broadcast(&tx)?;
-            self.file.paid_payouts.push(t.txid);
+            // Convention: the burned value is output 0, sent to the operator.
+            let Some(n) = note::decrypt_as_recipient(&env.ct[0], &env.pk_eph[0], &der.sk_view) else { continue };
+            if on_chain.contains(&nf[..]) {
+                self.file.paid_payouts.push(key);
+                self.save()?;
+                continue;
+            }
+            let tx = match validate_payout(p, n.v).and_then(|_| self.build_payout(e, p, &nf)) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    self.fail_payout(&t.txid, key, err)?;
+                    continue;
+                }
+            };
+            // Intent on disk before the network sees the transaction.
+            self.file.paid_payouts.push(key.clone());
             self.save()?;
-            done.push((t.txid, p.amount, paid));
+            match e.broadcast(&tx) {
+                Ok(paid) => done.push((t.txid, tx.output[0].value.to_sat(), paid)),
+                Err(err) => {
+                    self.file.paid_payouts.retain(|k| k != &key);
+                    self.fail_payout(&t.txid, key, err)?;
+                }
+            }
         }
         Ok(done)
     }
+
+    fn build_payout(&self, e: &mut Electrum, p: &Payout, nf: &[u8]) -> Result<Transaction> {
+        let mut utxos = e.listunspent(&self.vault.script_pubkey())?;
+        utxos.sort_by(|a, b| b.value.cmp(&a.value));
+        let out = |v: u64| vec![TxOut { value: Amount::from_sat(v), script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()) }];
+        let fee = self.vault.build_carrier(&utxos, nf, out(p.amount))?.vsize() as u64 * FEE_RATE_SAT_VB;
+        ensure!(p.amount >= fee + 546, "{} sat does not cover the {fee} sat fee plus dust", p.amount);
+        self.vault.build_carrier(&utxos, nf, out(p.amount - fee))
+    }
+
+    fn fail_payout(&mut self, txid: &Txid, key: String, err: anyhow::Error) -> Result<()> {
+        eprintln!("payout in {txid} not paid: {err:#}");
+        self.file.failed_payouts.insert(key, format!("{err:#}"));
+        self.save()
+    }
+}
+
+/// A peg-out request must not exceed the burn, must clear dust, and must
+/// pay a standard single-key or script-hash output.
+pub fn validate_payout(p: &Payout, burned: u64) -> Result<()> {
+    ensure!(p.amount <= burned, "asks {} sat but burned {burned} sat", p.amount);
+    ensure!(p.amount >= 546, "{} sat is below dust", p.amount);
+    let s = bitcoin::Script::from_bytes(&p.script_pubkey);
+    ensure!(s.is_p2wpkh() || s.is_p2tr() || s.is_p2sh() || s.is_p2pkh(), "non-standard payout script");
+    bitcoin::Address::from_script(s, NETWORK).context("payout script")?;
+    Ok(())
 }
 
 pub fn parse_address(s: &str) -> Result<Address> {

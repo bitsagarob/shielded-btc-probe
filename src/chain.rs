@@ -116,6 +116,15 @@ impl Electrum {
     }
 }
 
+impl Electrum {
+    /// Every txid touching a script, confirmed and mempool, oldest first.
+    pub fn history(&mut self, spk: &ScriptBuf) -> Result<Vec<Txid>> {
+        let v = self.call("blockchain.scripthash.get_history", json!([scripthash(spk)]))?;
+        let arr = v.as_array().ok_or_else(|| anyhow!("get_history not an array"))?;
+        arr.iter().map(|h| Ok(h["tx_hash"].as_str().unwrap_or_default().parse()?)).collect()
+    }
+}
+
 pub fn scripthash(spk: &ScriptBuf) -> String {
     let mut h = sha256::Hash::hash(spk.as_bytes()).to_byte_array();
     h.reverse();
