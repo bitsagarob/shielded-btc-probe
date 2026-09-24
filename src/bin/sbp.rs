@@ -282,7 +282,7 @@ fn scan(cli: &Cli) -> Result<()> {
             s.v,
             s.txid,
             s.j,
-            &s.to[..20]
+            s.to.chars().take(20).collect::<String>()
         );
     }
     Ok(())

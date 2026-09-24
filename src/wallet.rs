@@ -403,7 +403,7 @@ impl Wallet {
                 n.lock_anchor = None;
             } else if n
                 .lock_anchor
-                .is_some_and(|a| state.replayed_height > a + WINDOW_W)
+                .is_some_and(|a| state.replayed_height > a.saturating_add(WINDOW_W))
             {
                 n.locked_by = None;
                 n.lock_anchor = None;

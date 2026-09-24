@@ -150,9 +150,9 @@ impl State {
         let tree = MerkleTree::new();
         let mut roots = BTreeMap::new();
         // R[activation - 1] is the empty tree: the initial state.
-        roots.insert(deployment.activation - 1, tree.root());
+        roots.insert(deployment.activation.saturating_sub(1), tree.root());
         Self {
-            replayed_height: deployment.activation - 1,
+            replayed_height: deployment.activation.saturating_sub(1),
             deployment,
             tree,
             nullifiers: BTreeSet::new(),
@@ -258,7 +258,7 @@ impl State {
         // Keep a little more root history than the window needs.
         let keep_from = h.saturating_sub(WINDOW_W + 10);
         self.roots
-            .retain(|k, _| *k >= keep_from || *k == self.deployment.activation - 1);
+            .retain(|k, _| *k >= keep_from || *k == self.deployment.activation.saturating_sub(1));
         self.block_hashes.retain(|k, _| *k >= keep_from);
         let excess = self.rejections.len().saturating_sub(MAX_REJECTIONS);
         self.rejections.drain(..excess);
