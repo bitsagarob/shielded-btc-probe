@@ -16,7 +16,7 @@ ark-relations = "0.5"
 ark-serialize = "0.5"
 ark-snark = "0.5"
 ark-std = "0.5"
-bitcoin = "0.32"
+bitcoin = { version = "0.32", features = ["serde"] }
 chacha20poly1305 = "0.11.0"
 clap = { version = "4.6.7", features = ["derive"] }
 hex = "0.4.3"

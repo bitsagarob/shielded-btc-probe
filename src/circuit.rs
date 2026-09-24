@@ -8,7 +8,7 @@ use crate::{EdwardsAffine, EdwardsProjective, Fr, DIV_HASH_TRIES, N_IN, N_OUT, T
 use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
 use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
 use ark_ed_on_bls12_381::EdwardsConfig;
-use ark_ff::{AdditiveGroup, Field};
+use ark_ff::AdditiveGroup;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::eq::EqGadget;
@@ -318,12 +318,12 @@ pub fn input_leaf(sk_spend: &Fr, inp: &InputWitness) -> Fr {
     }
 }
 
-#[cfg(test)]
-mod tests {
+/// A self-contained witness used by tests and the bench: two notes owned by
+/// one wallet (one mint, one ciphertext note) spent to two outputs.
+pub mod sample {
     use super::*;
     use crate::keys::WalletKeys;
     use crate::tree::MerkleTree;
-    use ark_relations::r1cs::ConstraintSystem;
 
     pub fn sample_witness() -> (TransferWitness, PublicInputs) {
         let alice = WalletKeys::from_seed([11u8; 32]);
@@ -374,6 +374,14 @@ mod tests {
         let digest = crate::envelope::statement_digest(&w.h_body, &st.nf, &st.pk_eph, &st.ct);
         (w, PublicInputs { r_anchor: tree.root(), digest })
     }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use ark_ff::Field;
+    use super::sample::sample_witness;
+    use ark_relations::r1cs::ConstraintSystem;
 
     #[test]
     fn circuit_is_satisfied_by_native_witness() {
