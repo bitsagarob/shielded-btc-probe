@@ -106,7 +106,7 @@ choice made here and every place where the probe departs from the text.
 
 | | |
 |---|---|
-| R1CS constraints, 2 in 2 out | about 95,500 |
+| R1CS constraints, 2 in 2 out | 96,033 |
 | Groth16 setup, 1 thread | 11.8 s |
 | Groth16 setup, 16 threads | about 2 s |
 | Proving key | 56 MB |
