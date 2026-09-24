@@ -106,7 +106,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn anchor_window_bounds_hold_and_never_overflow() {
+fn replay_tx_anchor_window_bounds_hold_and_never_overflow() {
     let mut st = State::fresh(dep());
     let h = 1200u32;
     for k in (h - 110)..h {
@@ -133,7 +133,7 @@ fn anchor_window_bounds_hold_and_never_overflow() {
 }
 
 #[test]
-fn noncanonical_point_encoding_is_rejected() {
+fn parse_rejects_noncanonical_point_encoding() {
     let m = mint();
     let canon = m.to_bytes();
     let mut wire = canon.clone();
@@ -154,7 +154,7 @@ fn noncanonical_point_encoding_is_rejected() {
 }
 
 #[test]
-fn empty_payout_script_is_rejected() {
+fn parse_rejects_empty_payout_script() {
     let mut t = transfer(1);
     t.payout = Some(Payout {
         amount: 0,
@@ -172,7 +172,7 @@ fn empty_payout_script_is_rejected() {
 }
 
 #[test]
-fn nonminimal_push_is_not_a_carrier() {
+fn op_return_payload_rejects_nonminimal_push() {
     let nonminimal = |payload: &[u8]| {
         let mut s = vec![0x6a, 0x4e];
         s.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -196,7 +196,7 @@ fn nonminimal_push_is_not_a_carrier() {
 }
 
 #[test]
-fn malformed_magic_carriers_are_recorded_not_skipped() {
+fn replay_tx_records_malformed_magic_carriers() {
     let m = mint().to_bytes();
     let two = vec![pay_vault(1), push(&m), push(b"note")];
     assert_eq!(
@@ -223,7 +223,7 @@ fn malformed_magic_carriers_are_recorded_not_skipped() {
 }
 
 #[test]
-fn saved_nullifier_order_is_stable() {
+fn save_writes_nullifiers_in_stable_order() {
     let dir = scratch("nf-order");
     let mut files = std::collections::HashSet::new();
     for i in 0..8 {
@@ -239,7 +239,7 @@ fn saved_nullifier_order_is_stable() {
 }
 
 #[test]
-fn same_mint_twice_is_two_notes() {
+fn replay_tx_accepts_the_same_mint_twice() {
     let mut st = State::fresh(dep());
     let m = mint().to_bytes();
     replay(&mut st, 1000, vec![pay_vault(1), push(&m)]).unwrap();
@@ -254,7 +254,7 @@ fn same_mint_twice_is_two_notes() {
 }
 
 #[test]
-fn tree_and_state_roundtrip_hold() {
+fn save_load_roundtrip_keeps_tree_and_state() {
     let mut st = State::fresh(dep());
     let empty = st.tree.root();
     for k in 1..=3u64 {

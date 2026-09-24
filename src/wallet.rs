@@ -436,8 +436,8 @@ impl Wallet {
         Ok(n)
     }
 
-    pub fn funding_utxos(&self, e: &mut Electrum) -> Result<Vec<Utxo>, Error> {
-        let mut u = e.listunspent(&self.funding.script_pubkey())?;
+    pub fn funding_utxos(&self, client: &mut Electrum) -> Result<Vec<Utxo>, Error> {
+        let mut u = client.listunspent(&self.funding.script_pubkey())?;
         u.sort_by_key(|u| Reverse(u.value));
         Ok(u)
     }
@@ -446,7 +446,7 @@ impl Wallet {
     /// to our own address in the same carrier.
     pub fn mint(
         &mut self,
-        e: &mut Electrum,
+        client: &mut Electrum,
         vault_spk: &ScriptBuf,
         amount: u64,
     ) -> Result<(Txid, usize, usize), Error> {
@@ -458,7 +458,7 @@ impl Wallet {
             r_seed,
         });
         let payload = env.to_bytes();
-        let utxos = self.funding_utxos(e)?;
+        let utxos = self.funding_utxos(client)?;
         let tx = self.funding.build_carrier(
             &utxos,
             &payload,
@@ -468,7 +468,7 @@ impl Wallet {
             }],
         )?;
         let vsize = tx.vsize();
-        let txid = e.broadcast(&tx)?;
+        let txid = client.broadcast(&tx)?;
         Ok((txid, payload.len(), vsize))
     }
 
@@ -476,7 +476,7 @@ impl Wallet {
     /// optional peg-out request. Returns (txid, envelope bytes, vsize, prove seconds).
     pub fn send(
         &mut self,
-        e: &mut Electrum,
+        client: &mut Electrum,
         state: &State,
         params: &Params,
         to: &Address,
@@ -598,10 +598,10 @@ impl Wallet {
         }
 
         let payload = env.to_bytes();
-        let utxos = self.funding_utxos(e)?;
+        let utxos = self.funding_utxos(client)?;
         let tx = self.funding.build_carrier(&utxos, &payload, vec![])?;
         let vsize = tx.vsize();
-        let txid = e.broadcast(&tx)?;
+        let txid = client.broadcast(&tx)?;
         for &i in &chosen {
             self.file.notes[i].locked_by = Some(txid);
             self.file.notes[i].lock_anchor = Some(h_anchor);
@@ -615,15 +615,15 @@ impl Wallet {
     /// (request txid, sat paid, payout txid) per payout made.
     pub fn process_payouts(
         &mut self,
-        e: &mut Electrum,
+        client: &mut Electrum,
         state: &State,
     ) -> Result<Vec<(Txid, u64, Txid)>, Error> {
         let der = self.keys.derive();
         // Payout carriers publish nf[0] in their OP_RETURN, so the chain itself
         // says what was already paid.
         let mut on_chain: HashSet<Vec<u8>> = HashSet::new();
-        for txid in e.history(&self.vault.script_pubkey())? {
-            if let Ok(Some(p)) = op_return_payload(&e.transaction(&txid)?) {
+        for txid in client.history(&self.vault.script_pubkey())? {
+            if let Ok(Some(p)) = op_return_payload(&client.transaction(&txid)?) {
                 on_chain.insert(p);
             }
         }
@@ -650,7 +650,7 @@ impl Wallet {
                 self.save()?;
                 continue;
             }
-            let tx = match validate_payout(p, n.v).and_then(|_| self.build_payout(e, p, &nf)) {
+            let tx = match validate_payout(p, n.v).and_then(|_| self.build_payout(client, p, &nf)) {
                 Ok(tx) => tx,
                 Err(err) => {
                     self.fail_payout(&t.txid, key, err)?;
@@ -660,7 +660,7 @@ impl Wallet {
             // Intent on disk before the network sees the transaction.
             self.file.paid_payouts.push(key.clone());
             self.save()?;
-            match e.broadcast(&tx) {
+            match client.broadcast(&tx) {
                 Ok(paid) => done.push((t.txid, tx.output[0].value.to_sat(), paid)),
                 Err(err) => {
                     self.file.paid_payouts.retain(|k| k != &key);
@@ -671,8 +671,13 @@ impl Wallet {
         Ok(done)
     }
 
-    fn build_payout(&self, e: &mut Electrum, p: &Payout, nf: &[u8]) -> Result<Transaction, Error> {
-        let mut utxos = e.listunspent(&self.vault.script_pubkey())?;
+    fn build_payout(
+        &self,
+        client: &mut Electrum,
+        p: &Payout,
+        nf: &[u8],
+    ) -> Result<Transaction, Error> {
+        let mut utxos = client.listunspent(&self.vault.script_pubkey())?;
         utxos.sort_by_key(|u| Reverse(u.value));
         let out = |v: u64| {
             vec![TxOut {

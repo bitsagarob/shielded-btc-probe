@@ -120,7 +120,7 @@ impl MerklePath {
 mod tests {
     use super::*;
     #[test]
-    fn paths_verify() {
+    fn path_root_matches_tree_root() {
         let mut t = MerkleTree::new();
         let empty_root = t.root();
         for i in 1..=5u64 {

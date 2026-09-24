@@ -203,10 +203,10 @@ impl State {
     /// Replays every block from replayed_height + 1 to the tip. Returns the
     /// number of blocks processed. On a reorganisation the whole state is
     /// rebuilt from activation, which is cheap on a probe.
-    pub fn sync(&mut self, e: &mut Electrum, params: &Params) -> Result<u32, Error> {
-        let tip = e.tip_height()?;
+    pub fn sync(&mut self, client: &mut Electrum, params: &Params) -> Result<u32, Error> {
+        let tip = client.tip_height()?;
         if let Some(h) = self.block_hashes.get(&self.replayed_height).copied() {
-            if e.block_hash(self.replayed_height)? != h {
+            if client.block_hash(self.replayed_height)? != h {
                 log::warn!(
                     "reorganisation at or below {}: replaying from activation",
                     self.replayed_height
@@ -217,7 +217,7 @@ impl State {
         let mut n = 0;
         while self.replayed_height < tip {
             let h = self.replayed_height + 1;
-            self.replay_block(e, params, h)?;
+            self.replay_block(client, params, h)?;
             n += 1;
         }
         Ok(n)
@@ -226,13 +226,18 @@ impl State {
     /// Fetches the whole block before touching state, and bails if the
     /// block hash moved meanwhile: nothing is mutated and the next sync
     /// rebuilds from its stored tip.
-    fn replay_block(&mut self, e: &mut Electrum, params: &Params, h: u32) -> Result<(), Error> {
-        let hash = e.block_hash(h)?;
+    fn replay_block(
+        &mut self,
+        client: &mut Electrum,
+        params: &Params,
+        h: u32,
+    ) -> Result<(), Error> {
+        let hash = client.block_hash(h)?;
         let mut txs = Vec::new();
-        for txid in e.block_txids(h)? {
-            txs.push((txid, e.transaction(&txid)?));
+        for txid in client.block_txids(h)? {
+            txs.push((txid, client.transaction(&txid)?));
         }
-        if e.block_hash(h)? != hash {
+        if client.block_hash(h)? != hash {
             return Err(Error::BlockChanged(h));
         }
         let vault = self.deployment.vault_script_pubkey.clone();

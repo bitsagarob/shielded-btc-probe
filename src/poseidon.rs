@@ -72,7 +72,7 @@ pub fn hash_bytes(tag: u64, bytes: &[u8]) -> Fr {
 mod tests {
     use super::*;
     #[test]
-    fn deterministic_and_tagged() {
+    fn hash_is_deterministic_and_tag_separated() {
         let a = hash(tag::LEAF, &[Fr::from(1u64), Fr::from(2u64)]);
         let b = hash(tag::LEAF, &[Fr::from(1u64), Fr::from(2u64)]);
         let c = hash(tag::NF, &[Fr::from(1u64), Fr::from(2u64)]);

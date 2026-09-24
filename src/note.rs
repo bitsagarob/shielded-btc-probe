@@ -256,7 +256,7 @@ mod tests {
     use crate::keys::WalletKeys;
 
     #[test]
-    fn encrypt_decrypt_both_sides() {
+    fn encrypt_decrypts_for_recipient_and_sender() {
         let bob = WalletKeys::from_seed([1u8; 32]);
         let addr = bob.address(3);
         let note = NotePlaintext {
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_roundtrip() {
+    fn pack_vd_unpack_vd_roundtrip() {
         let d = [0xabu8; DIVERSIFIER_LEN];
         assert_eq!(unpack_vd(&pack_vd(u64::MAX, &d)), Some((u64::MAX, d)));
     }

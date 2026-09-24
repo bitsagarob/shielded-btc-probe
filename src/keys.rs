@@ -278,7 +278,7 @@ mod tests {
     use rand::RngCore;
 
     #[test]
-    fn seven_is_a_nonresidue() {
+    fn nonresidue_has_no_square_root() {
         assert!(nonresidue().sqrt().is_none());
     }
 
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn random_diversifiers_all_have_a_point() {
+    fn diversify_hash_finds_a_point_for_random_diversifiers() {
         let mut rng = rand::thread_rng();
         for _ in 0..300 {
             let mut d = [0u8; DIVERSIFIER_LEN];
@@ -305,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn address_roundtrip() {
+    fn address_display_from_str_roundtrip() {
         let w = WalletKeys::from_seed([7u8; 32]);
         let a = w.address(0);
         assert_eq!(a.to_string().parse::<Address>().unwrap(), a);
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn scalar_truncation_matches_bits() {
+    fn scalar_from_field_keeps_low_bits() {
         let x = Fr::from(12345u64);
         assert_eq!(scalar_from_field(&x), Fs::from(12345u64));
     }

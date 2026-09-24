@@ -296,7 +296,7 @@ mod tests {
     };
 
     #[test]
-    fn transfer_roundtrip_and_size() {
+    fn parse_transfer_roundtrip_and_size() {
         let w = WalletKeys::from_seed([3u8; 32]);
         let a = w.address(0);
         let n = NotePlaintext {

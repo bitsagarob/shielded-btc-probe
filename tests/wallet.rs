@@ -157,7 +157,7 @@ fn scan_rescans_when_history_changed() {
 }
 
 #[test]
-fn stale_note_is_dropped_and_rediscovered() {
+fn scan_drops_and_rediscovers_a_stale_note() {
     let op = Wallet::create(&tmp("op9")).unwrap();
     let mut alice = Wallet::create(&tmp("alice9")).unwrap();
     let mut st = fresh_state(&op);
@@ -170,7 +170,7 @@ fn stale_note_is_dropped_and_rediscovered() {
 }
 
 #[test]
-fn lock_lapses_after_anchor_window() {
+fn scan_releases_a_lock_after_the_anchor_window() {
     let op = Wallet::create(&tmp("op3")).unwrap();
     let mut alice = Wallet::create(&tmp("alice3")).unwrap();
     let mut st = fresh_state(&op);
@@ -188,7 +188,7 @@ fn lock_lapses_after_anchor_window() {
 }
 
 #[test]
-fn lock_without_anchor_needs_manual_unlock() {
+fn unlock_releases_a_lock_without_anchor() {
     let op = Wallet::create(&tmp("op4")).unwrap();
     let mut alice = Wallet::create(&tmp("alice4")).unwrap();
     let mut st = fresh_state(&op);
@@ -205,7 +205,7 @@ fn lock_without_anchor_needs_manual_unlock() {
 }
 
 #[test]
-fn third_party_with_vk_out_cannot_forge_sent_history() {
+fn scan_ignores_sent_records_forged_with_vk_out() {
     let op = Wallet::create(&tmp("op5")).unwrap();
     let mut alice = Wallet::create(&tmp("alice5")).unwrap();
     let carol = Wallet::create(&tmp("carol5")).unwrap();
@@ -229,7 +229,7 @@ fn third_party_with_vk_out_cannot_forge_sent_history() {
 }
 
 #[test]
-fn own_spend_is_recorded_as_sent() {
+fn scan_records_own_spend_as_sent() {
     let op = Wallet::create(&tmp("op6")).unwrap();
     let mut alice = Wallet::create(&tmp("alice6")).unwrap();
     let carol = Wallet::create(&tmp("carol6")).unwrap();
@@ -262,7 +262,7 @@ fn own_spend_is_recorded_as_sent() {
 }
 
 #[test]
-fn burned_output_is_recorded_spent() {
+fn scan_records_burned_output_as_spent() {
     let mut op = Wallet::create(&tmp("op7")).unwrap();
     let alice = Wallet::create(&tmp("alice7")).unwrap();
     let mut st = fresh_state(&op);
@@ -295,7 +295,7 @@ fn burned_output_is_recorded_spent() {
 }
 
 #[test]
-fn zero_value_outputs_are_skipped() {
+fn scan_skips_zero_value_outputs() {
     let op = Wallet::create(&tmp("op8")).unwrap();
     let mut alice = Wallet::create(&tmp("alice8")).unwrap();
     let mut st = fresh_state(&op);
@@ -312,7 +312,7 @@ fn zero_value_outputs_are_skipped() {
 }
 
 #[test]
-fn wallet_file_is_private() {
+fn create_writes_a_private_wallet_file() {
     let p = tmp("perm");
     let _ = Wallet::create(&p).unwrap();
     assert_eq!(
@@ -322,7 +322,7 @@ fn wallet_file_is_private() {
 }
 
 #[test]
-fn older_wallet_file_gets_a_vault_key() {
+fn open_fills_a_missing_vault_key() {
     let p = tmp("old");
     let w = Wallet::create(&p).unwrap();
     let old = format!(
@@ -348,7 +348,7 @@ fn older_wallet_file_gets_a_vault_key() {
 }
 
 #[test]
-fn recovery_roundtrip() {
+fn encrypt_recovery_decrypt_recovery_roundtrip() {
     let a = Wallet::create(&tmp("rec")).unwrap();
     let vk = a.keys.derive().vk_out;
     let records = vec![
@@ -364,7 +364,7 @@ fn recovery_roundtrip() {
 }
 
 #[test]
-fn payout_validation() {
+fn validate_payout_cases() {
     let p2wpkh = FundingKey::from_bytes(&[8u8; 32])
         .unwrap()
         .script_pubkey()
@@ -446,7 +446,7 @@ fn payout_validation() {
 }
 
 #[test]
-fn payouts_refuse_bad_requests_and_keep_going() {
+fn process_payouts_refuses_bad_requests_and_keeps_going() {
     let mut op = Wallet::create(&tmp("op10")).unwrap();
     let alice = Wallet::create(&tmp("alice10")).unwrap();
     let mut st = fresh_state(&op);

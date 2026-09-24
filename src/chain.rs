@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     #[ignore = "reads the live Fulcrum at 127.0.0.1:50001"]
-    fn fulcrum_reachable_and_enumerates_blocks() {
+    fn electrum_connects_and_enumerates_blocks() {
         let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
         let tip = e.tip_height().unwrap();
         assert!(tip > 1000);
@@ -394,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn op_return_extraction() {
+    fn op_return_payload_extracts_the_carrier_push() {
         let k = FundingKey::from_bytes(&[9u8; 32]).unwrap();
         let utxos = vec![Utxo {
             outpoint: OutPoint::new(Txid::all_zeros(), 0),

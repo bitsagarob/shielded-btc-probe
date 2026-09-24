@@ -67,7 +67,7 @@ fn run(constrain: bool) -> bool {
 }
 
 #[test]
-fn unconstrained_h_body_is_still_bound_by_arkworks() {
+fn groth16_verify_binds_an_unconstrained_public_input() {
     assert!(
         !run(false),
         "arkworks adds input constraints in its QAP reduction, so this must not verify"
@@ -75,6 +75,6 @@ fn unconstrained_h_body_is_still_bound_by_arkworks() {
 }
 
 #[test]
-fn constrained_h_body_is_bound() {
+fn groth16_verify_binds_a_constrained_public_input() {
     assert!(!run(true));
 }
