@@ -297,6 +297,7 @@ impl Wallet {
             .iter()
             .map(|n| own_nullifier(&der, n))
             .collect();
+        let operator = self.address().to_string() == state.deployment.operator_address;
         let mut found = 0;
         for ev in &state.events[self.file.scanned_events..] {
             match ev {
@@ -334,8 +335,9 @@ impl Wallet {
                         else {
                             continue;
                         };
-                        // Output 0 of a transfer carrying a payout is the peg-out burn.
-                        let burned = j == 0 && env.payout.is_some();
+                        // Output 0 of a transfer carrying a payout is the peg-out
+                        // burn, but only in the operator's hands.
+                        let burned = operator && j == 0 && env.payout.is_some();
                         let n = OwnedNote {
                             v: n.v,
                             d: n.d,

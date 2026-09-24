@@ -572,3 +572,25 @@ fn a_stranger_paying_the_vault_with_nf_in_op_return_is_not_a_payout() {
     assert!(!spends_vault(&forged, &vault, &mut prev).unwrap());
     assert!(spends_vault(&spend(1), &vault, &mut prev).unwrap());
 }
+
+#[test]
+fn burn_marking_spares_non_operator_recipients() {
+    let op = Wallet::create(&tmp("op12")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice12")).unwrap();
+    let mut st = fresh_state(&op);
+    let a = alice.address();
+    transfer(
+        &mut st,
+        [(&a, 1000, 77), (&a, 1000, 78)],
+        None,
+        [Fr::from(1u64), Fr::from(2u64)],
+        Some(Payout {
+            amount: 1000,
+            script_pubkey: vec![0x51],
+        }),
+        3,
+    );
+    assert_eq!(alice.scan(&st).unwrap(), 2);
+    assert!(!alice.file.notes[0].spent);
+    assert_eq!(alice.balance(), 2000);
+}

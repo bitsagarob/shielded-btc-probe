@@ -47,6 +47,9 @@ The carrier parser now rejects, and logs, transactions with two OP_RETURN output
 The operator now holds a separate vault key, deducts the payout transaction fee from the user's amount, refuses payouts below 546 sat or to a non-standard script, and tags each payout with the request's first nullifier so a restored operator wallet does not pay twice.
 DiversifyHash is bounded at 32 candidates; a diversifier with no curve point is not a valid address.
 `sbp unlock` clears the lock that a failed or unconfirmed send leaves on its input notes.
+A vault history entry counts as a paid request only when the transaction spends a vault output and is confirmed, or is one this wallet broadcast; anyone can pay the vault and echo a nullifier in an OP_RETURN.
+A chain error, an empty vault or a fee that does not converge leaves a payout request pending for the next run; only the request itself (over the burn, below dust, non-standard script, below fee) is refused and recorded.
+Output 0 of a payout-carrying transfer is marked burned only in the operator wallet; any other recipient keeps the note.
 PROFILE.md records the corrected witness list, the 64-bit value range, the wallet anchor policy and the attacks the public setup allows.
 
 ## Run it
