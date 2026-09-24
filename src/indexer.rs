@@ -8,11 +8,14 @@ use crate::note;
 use crate::prover::Params;
 use crate::tree::MerkleTree;
 use crate::{Fr, K_MIN, N_OUT, WINDOW_W};
-use anyhow::{Context, Result};
-use bitcoin::{BlockHash, ScriptBuf, Txid};
+use anyhow::{ensure, Context, Result};
+use bitcoin::{BlockHash, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+/// Rejections kept in the state file: the most recent ones.
+pub const MAX_REJECTIONS: usize = 1000;
 
 /// Deployment profile: fixed once, shared by every wallet and indexer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,6 +80,27 @@ pub struct Rejection {
     pub reason: String,
 }
 
+/// Why a carrier transaction was not accepted. Display is the stored text.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RejectReason {
+    #[error("carrier: {0}")]
+    Carrier(&'static str),
+    #[error("parse: {0}")]
+    Parse(String),
+    #[error("anchor {anchor} outside window for block {height}")]
+    AnchorOutsideWindow { anchor: u32, height: u32 },
+    #[error("no retained root for anchor {0}")]
+    NoRetainedRoot(u32),
+    #[error("duplicate nullifier inside envelope")]
+    DuplicateNullifier,
+    #[error("nullifier {} already spent", hex::encode(keys::fr_to_bytes(.0)))]
+    NullifierSpent(Fr),
+    #[error("proof does not verify")]
+    ProofInvalid,
+    #[error("mint carrier pays nothing to the vault")]
+    MintUnfunded,
+}
+
 #[derive(Serialize, Deserialize)]
 struct StateFile {
     deployment: Deployment,
@@ -93,7 +117,7 @@ pub struct State {
     pub deployment: Deployment,
     pub replayed_height: u32,
     pub tree: MerkleTree,
-    pub nullifiers: HashSet<Fr>,
+    pub nullifiers: BTreeSet<Fr>,
     pub roots: BTreeMap<u32, Fr>,
     pub block_hashes: BTreeMap<u32, BlockHash>,
     pub events: Vec<Event>,
@@ -110,7 +134,7 @@ impl State {
             replayed_height: deployment.activation - 1,
             deployment,
             tree,
-            nullifiers: HashSet::new(),
+            nullifiers: BTreeSet::new(),
             roots,
             block_hashes: BTreeMap::new(),
             events: Vec::new(),
@@ -173,29 +197,20 @@ impl State {
         Ok(n)
     }
 
+    /// Fetches the whole block before touching state, and bails if the
+    /// block hash moved meanwhile: nothing is mutated and the next sync
+    /// rebuilds from its stored tip.
     fn replay_block(&mut self, e: &mut Electrum, params: &Params, h: u32) -> Result<()> {
         let hash = e.block_hash(h)?;
-        let vault = self.deployment.vault_spk()?;
+        let mut txs = Vec::new();
         for txid in e.block_txids(h)? {
-            let tx = e.transaction(&txid)?;
-            let Some(payload) = op_return_payload(&tx) else { continue };
-            let env = match Envelope::parse(&payload) {
-                Ok(Some(env)) => env,
-                Ok(None) => continue,
-                Err(err) => {
-                    self.rejections.push(Rejection { txid, height: h, reason: format!("parse: {err}") });
-                    continue;
-                }
-            };
-            let result = match env {
-                Envelope::Transfer(t) => self.accept_transfer(params, h, txid, &t, &payload),
-                Envelope::Mint(m) => {
-                    let value: u64 = tx.output.iter().filter(|o| o.script_pubkey == vault).map(|o| o.value.to_sat()).sum();
-                    self.accept_mint(h, txid, &m, &payload, value)
-                }
-            };
-            if let Err(reason) = result {
-                self.rejections.push(Rejection { txid, height: h, reason });
+            txs.push((txid, e.transaction(&txid)?));
+        }
+        ensure!(e.block_hash(h)? == hash, "block {h} changed while it was being fetched");
+        let vault = self.deployment.vault_spk()?;
+        for (txid, tx) in &txs {
+            if let Err(reason) = self.replay_tx(params, h, *txid, tx, &vault) {
+                self.rejections.push(Rejection { txid: *txid, height: h, reason: reason.to_string() });
             }
         }
         self.roots.insert(h, self.tree.root());
@@ -205,27 +220,44 @@ impl State {
         let keep_from = h.saturating_sub(WINDOW_W + 10);
         self.roots.retain(|k, _| *k >= keep_from || *k == self.deployment.activation - 1);
         self.block_hashes.retain(|k, _| *k >= keep_from);
+        let excess = self.rejections.len().saturating_sub(MAX_REJECTIONS);
+        self.rejections.drain(..excess);
         Ok(())
+    }
+
+    /// One transaction of block `h`. Ok when it carries no envelope or the
+    /// envelope was accepted; Err with the reason to record otherwise.
+    pub fn replay_tx(&mut self, params: &Params, h: u32, txid: Txid, tx: &Transaction, vault: &ScriptBuf) -> std::result::Result<(), RejectReason> {
+        let Some(payload) = op_return_payload(tx).map_err(RejectReason::Carrier)? else { return Ok(()) };
+        match Envelope::parse(&payload).map_err(|e| RejectReason::Parse(e.to_string()))? {
+            None => Ok(()),
+            Some(Envelope::Transfer(t)) => self.accept_transfer(params, h, txid, &t, &payload),
+            Some(Envelope::Mint(m)) => {
+                let value = tx.output.iter().filter(|o| o.script_pubkey == *vault).map(|o| o.value.to_sat()).sum();
+                self.accept_mint(h, txid, &m, &payload, value)
+            }
+        }
     }
 
     /// Paper A.7 order: parse (done), binding, anchor window, nullifiers,
     /// proof, then mutate.
-    fn accept_transfer(&mut self, params: &Params, h: u32, txid: Txid, t: &TransferEnvelope, payload: &[u8]) -> std::result::Result<(), String> {
-        if t.h_anchor + WINDOW_W < h || t.h_anchor + K_MIN > h {
-            return Err(format!("anchor {} outside window for block {h}", t.h_anchor));
+    fn accept_transfer(&mut self, params: &Params, h: u32, txid: Txid, t: &TransferEnvelope, payload: &[u8]) -> std::result::Result<(), RejectReason> {
+        let (anchor, height) = (u64::from(t.h_anchor), u64::from(h));
+        if anchor + u64::from(WINDOW_W) < height || anchor + u64::from(K_MIN) > height {
+            return Err(RejectReason::AnchorOutsideWindow { anchor: t.h_anchor, height: h });
         }
-        let r_anchor = *self.roots.get(&t.h_anchor).ok_or_else(|| format!("no retained root for anchor {}", t.h_anchor))?;
+        let r_anchor = *self.roots.get(&t.h_anchor).ok_or(RejectReason::NoRetainedRoot(t.h_anchor))?;
         if t.nf[0] == t.nf[1] {
-            return Err("duplicate nullifier inside envelope".into());
+            return Err(RejectReason::DuplicateNullifier);
         }
         for nf in &t.nf {
             if self.nullifiers.contains(nf) {
-                return Err(format!("nullifier {} already spent", hex::encode(keys::fr_to_bytes(nf))));
+                return Err(RejectReason::NullifierSpent(*nf));
             }
         }
         let public = crate::circuit::PublicInputs { r_anchor, digest: t.statement_digest() };
         if !params.verify(&public, &t.proof) {
-            return Err("proof does not verify".into());
+            return Err(RejectReason::ProofInvalid);
         }
         let h_body = t.h_body();
         let mut positions = [0u64; N_OUT];
@@ -239,9 +271,9 @@ impl State {
         Ok(())
     }
 
-    fn accept_mint(&mut self, h: u32, txid: Txid, m: &MintEnvelope, payload: &[u8], value: u64) -> std::result::Result<(), String> {
+    fn accept_mint(&mut self, h: u32, txid: Txid, m: &MintEnvelope, payload: &[u8], value: u64) -> std::result::Result<(), RejectReason> {
         if value == 0 {
-            return Err("mint carrier pays nothing to the vault".into());
+            return Err(RejectReason::MintUnfunded);
         }
         let pos = self.tree.append(note::mint_leaf(value, &m.d, &m.pk_d, &m.r_seed));
         self.events.push(Event::Mint(AcceptedMint { txid, height: h, bytes: hex::encode(payload), value, pos }));

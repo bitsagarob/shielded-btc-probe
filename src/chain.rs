@@ -1,10 +1,12 @@
 //! Bitcoin side: an Electrum-protocol client for the signet's Fulcrum, and
 //! the carrier transaction that publishes an envelope in one OP_RETURN.
 
-use anyhow::{anyhow, bail, Context, Result};
+use crate::envelope::MAGIC;
+use anyhow::{bail, Result};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::key::Secp256k1;
+use bitcoin::script::Instruction;
 use bitcoin::secp256k1::{Message, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{
@@ -18,6 +20,22 @@ use std::net::TcpStream;
 pub const DEFAULT_ELECTRUM: &str = "127.0.0.1:50001";
 pub const NETWORK: Network = Network::Signet;
 pub const FEE_RATE_SAT_VB: u64 = 2;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("rpc error {code}: {message}")]
+    Rpc { code: i64, message: String },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("protocol: {0}")]
+    Protocol(String),
+}
+
+fn protocol<E: std::fmt::Display>(e: E) -> Error {
+    Error::Protocol(e.to_string())
+}
 
 pub struct Electrum {
     reader: BufReader<TcpStream>,
@@ -33,8 +51,8 @@ pub struct Utxo {
 }
 
 impl Electrum {
-    pub fn connect(addr: &str) -> Result<Self> {
-        let stream = TcpStream::connect(addr).with_context(|| format!("connecting to Fulcrum at {addr}"))?;
+    pub fn connect(addr: &str) -> Result<Self, Error> {
+        let stream = TcpStream::connect(addr)?;
         stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
         let writer = stream.try_clone()?;
         let mut e = Self { reader: BufReader::new(stream), writer, next_id: 0 };
@@ -42,7 +60,7 @@ impl Electrum {
         Ok(e)
     }
 
-    pub fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, Error> {
         self.next_id += 1;
         let req = json!({"id": self.next_id, "method": method, "params": params});
         self.writer.write_all(format!("{req}\n").as_bytes())?;
@@ -51,63 +69,66 @@ impl Electrum {
         let v: Value = loop {
             let mut line = String::new();
             if self.reader.read_line(&mut line)? == 0 {
-                bail!("Fulcrum closed the connection");
+                return Err(Error::Protocol("Fulcrum closed the connection".into()));
             }
-            let v: Value = serde_json::from_str(&line).context("parsing Fulcrum reply")?;
+            let v: Value = serde_json::from_str(&line)?;
             if v.get("id").and_then(|i| i.as_u64()) == Some(self.next_id) {
                 break v;
             }
         };
         if let Some(err) = v.get("error") {
             if !err.is_null() {
-                bail!("{method}: {err}");
+                return Err(Error::Rpc {
+                    code: err["code"].as_i64().unwrap_or(0),
+                    message: err["message"].as_str().map(str::to_owned).unwrap_or_else(|| err.to_string()),
+                });
             }
         }
         Ok(v["result"].clone())
     }
 
-    pub fn tip_height(&mut self) -> Result<u32> {
+    pub fn tip_height(&mut self) -> Result<u32, Error> {
         let v = self.call("blockchain.headers.subscribe", json!([]))?;
-        v["height"].as_u64().map(|h| h as u32).ok_or_else(|| anyhow!("no height in header"))
+        v["height"].as_u64().map(|h| h as u32).ok_or_else(|| protocol("no height in header"))
     }
 
-    pub fn block_hash(&mut self, height: u32) -> Result<bitcoin::BlockHash> {
+    pub fn block_hash(&mut self, height: u32) -> Result<bitcoin::BlockHash, Error> {
         let hex = self.call("blockchain.block.header", json!([height]))?;
-        let raw = hex::decode(hex.as_str().ok_or_else(|| anyhow!("header not a string"))?)?;
-        let header: bitcoin::block::Header = deserialize(&raw)?;
+        let raw = hex::decode(hex.as_str().ok_or_else(|| protocol("header not a string"))?).map_err(protocol)?;
+        let header: bitcoin::block::Header = deserialize(&raw).map_err(protocol)?;
         Ok(header.block_hash())
     }
 
     /// All txids of a block, in block order, via transaction.id_from_pos.
-    pub fn block_txids(&mut self, height: u32) -> Result<Vec<Txid>> {
+    pub fn block_txids(&mut self, height: u32) -> Result<Vec<Txid>, Error> {
         let mut out = Vec::new();
         loop {
             match self.call("blockchain.transaction.id_from_pos", json!([height, out.len()])) {
-                Ok(v) => out.push(v.as_str().ok_or_else(|| anyhow!("txid not a string"))?.parse()?),
-                Err(e) if e.to_string().contains("No transaction at position") => break,
+                Ok(v) => out.push(v.as_str().ok_or_else(|| protocol("txid not a string"))?.parse().map_err(protocol)?),
+                Err(Error::Rpc { message, .. }) if message.starts_with("No transaction at position") => break,
                 Err(e) => return Err(e),
             }
         }
         Ok(out)
     }
 
-    pub fn transaction(&mut self, txid: &Txid) -> Result<Transaction> {
+    pub fn transaction(&mut self, txid: &Txid) -> Result<Transaction, Error> {
         let hex = self.call("blockchain.transaction.get", json!([txid.to_string()]))?;
-        Ok(deserialize(&hex::decode(hex.as_str().ok_or_else(|| anyhow!("tx not a string"))?)?)?)
+        deserialize(&hex::decode(hex.as_str().ok_or_else(|| protocol("tx not a string"))?).map_err(protocol)?).map_err(protocol)
     }
 
-    pub fn broadcast(&mut self, tx: &Transaction) -> Result<Txid> {
+    pub fn broadcast(&mut self, tx: &Transaction) -> Result<Txid, Error> {
         let v = self.call("blockchain.transaction.broadcast", json!([hex::encode(serialize(tx))]))?;
-        Ok(v.as_str().ok_or_else(|| anyhow!("txid not a string"))?.parse()?)
+        v.as_str().ok_or_else(|| protocol("txid not a string"))?.parse().map_err(protocol)
     }
 
-    pub fn listunspent(&mut self, spk: &ScriptBuf) -> Result<Vec<Utxo>> {
+    pub fn listunspent(&mut self, spk: &ScriptBuf) -> Result<Vec<Utxo>, Error> {
         let v = self.call("blockchain.scripthash.listunspent", json!([scripthash(spk)]))?;
-        let arr = v.as_array().ok_or_else(|| anyhow!("listunspent not an array"))?;
+        let arr = v.as_array().ok_or_else(|| protocol("listunspent not an array"))?;
         arr.iter()
             .map(|u| {
                 Ok(Utxo {
-                    outpoint: OutPoint::new(u["tx_hash"].as_str().unwrap_or_default().parse()?, u["tx_pos"].as_u64().unwrap_or(0) as u32),
+                    outpoint: OutPoint::new(u["tx_hash"].as_str().unwrap_or_default().parse().map_err(protocol)?, u["tx_pos"].as_u64().unwrap_or(0) as u32),
                     value: u["value"].as_u64().unwrap_or(0),
                     height: u["height"].as_u64().unwrap_or(0) as u32,
                 })
@@ -217,27 +238,28 @@ impl FundingKey {
     }
 }
 
-/// The OP_RETURN payload of a transaction, if it has exactly one.
-pub fn op_return_payload(tx: &Transaction) -> Option<Vec<u8>> {
-    let mut found = None;
-    for o in &tx.output {
-        if o.script_pubkey.is_op_return() {
-            if found.is_some() {
-                return None;
-            }
-            let mut instr = o.script_pubkey.instructions();
-            instr.next()?.ok()?; // OP_RETURN
-            let data = match instr.next()? {
-                Ok(bitcoin::script::Instruction::PushBytes(p)) => p.as_bytes().to_vec(),
-                _ => return None,
-            };
-            if instr.next().is_some() {
-                return None;
-            }
-            found = Some(data);
-        }
+/// The OP_RETURN payload of a transaction: Ok(None) when it carries no
+/// envelope, Err when an OP_RETURN starts with the magic but the carrier is
+/// not exactly one output holding one minimal push.
+pub fn op_return_payload(tx: &Transaction) -> Result<Option<Vec<u8>>, &'static str> {
+    let outs: Vec<&ScriptBuf> = tx.output.iter().map(|o| &o.script_pubkey).filter(|s| s.is_op_return()).collect();
+    let claims = outs
+        .iter()
+        .any(|s| s.instructions().nth(1).and_then(|i| i.ok()).and_then(|i| i.push_bytes().map(|p| p.as_bytes().starts_with(MAGIC))).unwrap_or(false));
+    let fault = |why| if claims { Err(why) } else { Ok(None) };
+    let [s] = outs[..] else {
+        return if outs.is_empty() { Ok(None) } else { fault("more than one OP_RETURN output") };
+    };
+    let mut instr = s.instructions_minimal().skip(1);
+    let payload = match instr.next() {
+        Some(Ok(Instruction::PushBytes(p))) => p.as_bytes().to_vec(),
+        Some(Err(_)) => return fault("non-minimal push"),
+        _ => return fault("OP_RETURN without a push"),
+    };
+    if instr.next().is_some() {
+        return fault("extra data after the envelope push");
     }
-    found
+    Ok(Some(payload))
 }
 
 #[cfg(test)]
@@ -262,7 +284,7 @@ mod tests {
         let utxos = vec![Utxo { outpoint: OutPoint::new(Txid::all_zeros(), 0), value: 100_000, height: 1 }];
         let payload = vec![7u8; 700];
         let tx = k.build_carrier(&utxos, &payload, vec![]).unwrap();
-        assert_eq!(op_return_payload(&tx), Some(payload));
+        assert_eq!(op_return_payload(&tx), Ok(Some(payload)));
         assert_eq!(tx.output.len(), 2);
         eprintln!("carrier vsize {} vB for a 700 byte envelope", tx.vsize());
     }

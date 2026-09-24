@@ -150,7 +150,7 @@ impl Envelope {
 
     /// Strict canonical parse. Returns None when the bytes are not an
     /// envelope at all (wrong magic), Err when they claim to be one and
-    /// fail to decode.
+    /// fail to decode or do not re-serialise to the same bytes (A.5).
     pub fn parse(b: &[u8]) -> Result<Option<Self>> {
         if b.len() < 6 || &b[..3] != MAGIC {
             return Ok(None);
@@ -180,7 +180,7 @@ impl Envelope {
                 let payout = if plen == 0 {
                     None
                 } else {
-                    ensure!(plen >= 8, "payout too short");
+                    ensure!(plen > 8, "payout too short");
                     let amount = u64::from_le_bytes(r.take(8)?.try_into().unwrap());
                     let script_pubkey = r.take(plen - 8)?.to_vec();
                     Some(Payout { amount, script_pubkey })
@@ -198,6 +198,7 @@ impl Envelope {
             k => bail!("unknown envelope kind {k:#x}"),
         };
         ensure!(r.pos == b.len(), "trailing bytes after envelope");
+        ensure!(env.to_bytes() == b, "non-canonical envelope encoding");
         Ok(Some(env))
     }
 }
