@@ -11,13 +11,9 @@ use crate::prover::Params;
 use crate::tree::MerklePath;
 use crate::{Fr, Fs, N_IN, N_OUT, TREE_DEPTH};
 use anyhow::{anyhow, ensure, Context, Result};
-use ark_ff::{BigInteger, PrimeField, UniformRand};
+use ark_ff::UniformRand;
 use bitcoin::{Amount, ScriptBuf, TxOut, Txid};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
-use chacha20poly1305::ChaCha20Poly1305;
-use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::path::Path;
 use std::time::Instant;
 
@@ -165,7 +161,7 @@ impl Wallet {
                         found += 1;
                     }
                     // Sender-side recovery of our own transfers.
-                    if let Some(records) = self.decrypt_ct_out(&env, &der.vk_out) {
+                    if let Some(records) = note::decrypt_recovery(&env.ct_out, &env.recovery_binding(), &der.vk_out) {
                         for (j, (pk_d, sk_eph)) in records.iter().enumerate() {
                             if let Some(n) = note::decrypt_as_sender(&env.ct[j], &env.pk_eph[j], pk_d, sk_eph) {
                                 if self.file.sent.iter().all(|s| !(s.txid == t.txid && s.j == j as u8)) {
@@ -189,40 +185,6 @@ impl Wallet {
         }
         self.save()?;
         Ok(found)
-    }
-
-    fn ct_out_key(vk_out: &[u8; 32], binding: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
-        let hk = Hkdf::<Sha256>::new(Some(binding), vk_out);
-        let mut key = [0u8; 32];
-        let mut nonce = [0u8; 12];
-        hk.expand(b"sbp/ctout/key", &mut key).expect("valid length");
-        hk.expand(b"sbp/ctout/nonce", &mut nonce).expect("valid length");
-        (key, nonce)
-    }
-
-    fn encrypt_ct_out(&self, binding: &[u8; 32], records: &[(crate::EdwardsAffine, Fs); N_OUT]) -> Vec<u8> {
-        let (key, nonce) = Self::ct_out_key(&self.keys.derive().vk_out, binding);
-        let mut pt = Vec::with_capacity(N_OUT * 64);
-        for (pk_d, s) in records {
-            pt.extend_from_slice(&keys::point_to_bytes(pk_d));
-            pt.extend_from_slice(&s.into_bigint().to_bytes_le());
-        }
-        let cipher = ChaCha20Poly1305::new((&key).into());
-        cipher.encrypt((&nonce).into(), AeadPayload { msg: &pt, aad: binding }).expect("aead")
-    }
-
-    fn decrypt_ct_out(&self, env: &TransferEnvelope, vk_out: &[u8; 32]) -> Option<Vec<(crate::EdwardsAffine, Fs)>> {
-        let binding = env.recovery_binding();
-        let (key, nonce) = Self::ct_out_key(vk_out, &binding);
-        let cipher = ChaCha20Poly1305::new((&key).into());
-        let pt = cipher.decrypt((&nonce).into(), AeadPayload { msg: &env.ct_out, aad: &binding }).ok()?;
-        let mut out = Vec::with_capacity(N_OUT);
-        for chunk in pt.chunks(64) {
-            let pk_d = keys::point_from_bytes(&chunk[..32])?;
-            let s = Fs::from_le_bytes_mod_order(&chunk[32..]);
-            out.push((pk_d, s));
-        }
-        Some(out)
     }
 
     pub fn funding_utxos(&self, e: &mut Electrum) -> Result<Vec<Utxo>> {
@@ -336,7 +298,7 @@ impl Wallet {
             payout,
             proof: vec![],
         };
-        env.ct_out = self.encrypt_ct_out(&env.recovery_binding(), &records);
+        env.ct_out = note::encrypt_recovery(&records, &env.recovery_binding(), &der.vk_out);
         ensure!(env.ct_out.len() == CT_OUT_LEN, "ct_out length");
         w.h_body = env.h_body();
         let public = PublicInputs { r_anchor, digest: env.statement_digest() };

@@ -171,3 +171,40 @@ mod tests {
         assert_eq!(unpack_vd(&pack_vd(u64::MAX, &d)), Some((u64::MAX, d)));
     }
 }
+
+fn recovery_key(vk_out: &[u8; 32], binding: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+    let hk = Hkdf::<Sha256>::new(Some(binding), vk_out);
+    let mut key = [0u8; 32];
+    let mut nonce = [0u8; 12];
+    hk.expand(b"sbp/ctout/key", &mut key).expect("valid length");
+    hk.expand(b"sbp/ctout/nonce", &mut nonce).expect("valid length");
+    (key, nonce)
+}
+
+/// Sender-recovery ciphertext ct_out (paper 16.2): the (pk_d, sk_eph) record
+/// of every output under ChaCha20-Poly1305, keyed from vk_out and the
+/// recovery binding, which is also the associated data.
+pub fn encrypt_recovery(records: &[(EdwardsAffine, Fs)], binding: &[u8; 32], vk_out: &[u8; 32]) -> Vec<u8> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::ChaCha20Poly1305;
+    let (key, nonce) = recovery_key(vk_out, binding);
+    let mut pt = Vec::with_capacity(records.len() * 64);
+    for (pk_d, s) in records {
+        pt.extend_from_slice(&keys::point_to_bytes(pk_d));
+        pt.extend_from_slice(&s.into_bigint().to_bytes_le());
+    }
+    ChaCha20Poly1305::new((&key).into()).encrypt((&nonce).into(), Payload { msg: &pt, aad: binding }).expect("aead")
+}
+
+pub fn decrypt_recovery(ct_out: &[u8], binding: &[u8; 32], vk_out: &[u8; 32]) -> Option<Vec<(EdwardsAffine, Fs)>> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::ChaCha20Poly1305;
+    let (key, nonce) = recovery_key(vk_out, binding);
+    let pt = ChaCha20Poly1305::new((&key).into()).decrypt((&nonce).into(), Payload { msg: ct_out, aad: binding }).ok()?;
+    if pt.len() % 64 != 0 {
+        return None;
+    }
+    pt.chunks(64).map(|c| Some((keys::point_from_bytes(&c[..32])?, Fs::from_le_bytes_mod_order(&c[32..])))).collect()
+}
