@@ -101,8 +101,11 @@ impl Wallet {
     }
 
     pub fn save(&self) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
         let tmp = self.path.with_extension("json.tmp");
-        serde_json::to_writer_pretty(std::fs::File::create(&tmp)?, &self.file)?;
+        let f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        serde_json::to_writer_pretty(&f, &self.file)?;
+        f.sync_all()?;
         std::fs::rename(tmp, &self.path)?;
         Ok(())
     }
