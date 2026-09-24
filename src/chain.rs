@@ -1,10 +1,12 @@
 //! Bitcoin side: an Electrum-protocol client for the signet's Fulcrum, and
 //! the carrier transaction that publishes an envelope in one OP_RETURN.
 
+use crate::envelope::MAGIC;
 use anyhow::{bail, Result};
 use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::key::Secp256k1;
+use bitcoin::script::Instruction;
 use bitcoin::secp256k1::{Message, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{
@@ -236,27 +238,28 @@ impl FundingKey {
     }
 }
 
-/// The OP_RETURN payload of a transaction, if it has exactly one.
-pub fn op_return_payload(tx: &Transaction) -> Option<Vec<u8>> {
-    let mut found = None;
-    for o in &tx.output {
-        if o.script_pubkey.is_op_return() {
-            if found.is_some() {
-                return None;
-            }
-            let mut instr = o.script_pubkey.instructions();
-            instr.next()?.ok()?; // OP_RETURN
-            let data = match instr.next()? {
-                Ok(bitcoin::script::Instruction::PushBytes(p)) => p.as_bytes().to_vec(),
-                _ => return None,
-            };
-            if instr.next().is_some() {
-                return None;
-            }
-            found = Some(data);
-        }
+/// The OP_RETURN payload of a transaction: Ok(None) when it carries no
+/// envelope, Err when an OP_RETURN starts with the magic but the carrier is
+/// not exactly one output holding one minimal push.
+pub fn op_return_payload(tx: &Transaction) -> Result<Option<Vec<u8>>, &'static str> {
+    let outs: Vec<&ScriptBuf> = tx.output.iter().map(|o| &o.script_pubkey).filter(|s| s.is_op_return()).collect();
+    let claims = outs
+        .iter()
+        .any(|s| s.instructions().nth(1).and_then(|i| i.ok()).and_then(|i| i.push_bytes().map(|p| p.as_bytes().starts_with(MAGIC))).unwrap_or(false));
+    let fault = |why| if claims { Err(why) } else { Ok(None) };
+    let [s] = outs[..] else {
+        return if outs.is_empty() { Ok(None) } else { fault("more than one OP_RETURN output") };
+    };
+    let mut instr = s.instructions_minimal().skip(1);
+    let payload = match instr.next() {
+        Some(Ok(Instruction::PushBytes(p))) => p.as_bytes().to_vec(),
+        Some(Err(_)) => return fault("non-minimal push"),
+        _ => return fault("OP_RETURN without a push"),
+    };
+    if instr.next().is_some() {
+        return fault("extra data after the envelope push");
     }
-    found
+    Ok(Some(payload))
 }
 
 #[cfg(test)]
@@ -281,7 +284,7 @@ mod tests {
         let utxos = vec![Utxo { outpoint: OutPoint::new(Txid::all_zeros(), 0), value: 100_000, height: 1 }];
         let payload = vec![7u8; 700];
         let tx = k.build_carrier(&utxos, &payload, vec![]).unwrap();
-        assert_eq!(op_return_payload(&tx), Some(payload));
+        assert_eq!(op_return_payload(&tx), Ok(Some(payload)));
         assert_eq!(tx.output.len(), 2);
         eprintln!("carrier vsize {} vB for a 700 byte envelope", tx.vsize());
     }
