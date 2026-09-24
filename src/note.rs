@@ -187,44 +187,6 @@ pub fn nullifier(sk_nf: &Fr, rho: &Fr, pos: u64) -> Fr {
     poseidon::hash(tag::NF, &[*sk_nf, *rho, Fr::from(pos)])
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::keys::WalletKeys;
-
-    #[test]
-    fn encrypt_decrypt_both_sides() {
-        let bob = WalletKeys::from_seed([1u8; 32]);
-        let addr = bob.address(3);
-        let note = NotePlaintext {
-            v: 123_456,
-            d: addr.d,
-            r_seed: Fr::from(99u64),
-        };
-        let (pk_eph, ct) = encrypt(&note, &addr.pk_d).unwrap();
-        assert_eq!(
-            decrypt_as_recipient(&ct, &pk_eph, &bob.derive().sk_view),
-            Some(note.clone())
-        );
-        assert_eq!(
-            decrypt_as_sender(&ct, &pk_eph, &addr.pk_d, &sk_eph(&note.r_seed)),
-            Some(note.clone())
-        );
-        let other = WalletKeys::from_seed([2u8; 32]);
-        assert_eq!(
-            decrypt_as_recipient(&ct, &pk_eph, &other.derive().sk_view),
-            None
-        );
-        assert_eq!(Ciphertext::from_bytes(&ct.to_bytes()), Some(ct));
-    }
-
-    #[test]
-    fn pack_roundtrip() {
-        let d = [0xabu8; DIVERSIFIER_LEN];
-        assert_eq!(unpack_vd(&pack_vd(u64::MAX, &d)), Some((u64::MAX, d)));
-    }
-}
-
 fn recovery_key(vk_out: &[u8; 32], binding: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
     let hk = Hkdf::<Sha256>::new(Some(binding), vk_out);
     let mut key = [0u8; 32];
@@ -286,4 +248,42 @@ pub fn decrypt_recovery(
             ))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::WalletKeys;
+
+    #[test]
+    fn encrypt_decrypt_both_sides() {
+        let bob = WalletKeys::from_seed([1u8; 32]);
+        let addr = bob.address(3);
+        let note = NotePlaintext {
+            v: 123_456,
+            d: addr.d,
+            r_seed: Fr::from(99u64),
+        };
+        let (pk_eph, ct) = encrypt(&note, &addr.pk_d).unwrap();
+        assert_eq!(
+            decrypt_as_recipient(&ct, &pk_eph, &bob.derive().sk_view),
+            Some(note.clone())
+        );
+        assert_eq!(
+            decrypt_as_sender(&ct, &pk_eph, &addr.pk_d, &sk_eph(&note.r_seed)),
+            Some(note.clone())
+        );
+        let other = WalletKeys::from_seed([2u8; 32]);
+        assert_eq!(
+            decrypt_as_recipient(&ct, &pk_eph, &other.derive().sk_view),
+            None
+        );
+        assert_eq!(Ciphertext::from_bytes(&ct.to_bytes()), Some(ct));
+    }
+
+    #[test]
+    fn pack_roundtrip() {
+        let d = [0xabu8; DIVERSIFIER_LEN];
+        assert_eq!(unpack_vd(&pack_vd(u64::MAX, &d)), Some((u64::MAX, d)));
+    }
 }

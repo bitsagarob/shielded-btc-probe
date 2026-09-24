@@ -73,7 +73,7 @@ pub enum Event {
 impl AcceptedTransfer {
     pub fn envelope(&self) -> TransferEnvelope {
         match Envelope::parse(&self.bytes).expect("stored envelope parses") {
-            Some(Envelope::Transfer(t)) => t,
+            Some(Envelope::Transfer(t)) => *t,
             _ => unreachable!("stored transfer event holds a transfer"),
         }
     }
@@ -324,8 +324,8 @@ impl State {
         }
         let h_body = t.h_body();
         let mut positions = [0u64; N_OUT];
-        for j in 0..N_OUT {
-            positions[j] = self
+        for (j, pos) in positions.iter_mut().enumerate() {
+            *pos = self
                 .tree
                 .append(note::leaf(&h_body, j as u8, &t.pk_eph[j], &t.ct[j]));
         }

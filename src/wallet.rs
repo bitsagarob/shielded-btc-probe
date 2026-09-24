@@ -16,6 +16,7 @@ use ark_ff::UniformRand;
 use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid, address::FromScriptError, secp256k1};
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashSet},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -437,7 +438,7 @@ impl Wallet {
 
     pub fn funding_utxos(&self, e: &mut Electrum) -> Result<Vec<Utxo>, Error> {
         let mut u = e.listunspent(&self.funding.script_pubkey())?;
-        u.sort_by(|a, b| b.value.cmp(&a.value));
+        u.sort_by_key(|u| Reverse(u.value));
         Ok(u)
     }
 
@@ -672,7 +673,7 @@ impl Wallet {
 
     fn build_payout(&self, e: &mut Electrum, p: &Payout, nf: &[u8]) -> Result<Transaction, Error> {
         let mut utxos = e.listunspent(&self.vault.script_pubkey())?;
-        utxos.sort_by(|a, b| b.value.cmp(&a.value));
+        utxos.sort_by_key(|u| Reverse(u.value));
         let out = |v: u64| {
             vec![TxOut {
                 value: Amount::from_sat(v),

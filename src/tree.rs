@@ -57,6 +57,10 @@ impl MerkleTree {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Appends a leaf and returns its position.
     pub fn append(&mut self, leaf: Fr) -> u64 {
         let pos = self.len;

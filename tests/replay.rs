@@ -167,7 +167,7 @@ fn empty_payout_script_is_rejected() {
     });
     assert_eq!(
         Envelope::parse(&t.to_bytes()).unwrap(),
-        Some(Envelope::Transfer(t))
+        Some(Envelope::Transfer(Box::new(t)))
     );
 }
 

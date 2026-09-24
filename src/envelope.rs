@@ -78,7 +78,7 @@ pub struct MintEnvelope {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Envelope {
-    Transfer(TransferEnvelope),
+    Transfer(Box<TransferEnvelope>),
     Mint(MintEnvelope),
 }
 
@@ -243,7 +243,7 @@ impl Envelope {
                     })
                 };
                 let proof = r.take(PROOF_LEN)?.to_vec();
-                Envelope::Transfer(TransferEnvelope {
+                Envelope::Transfer(Box::new(TransferEnvelope {
                     h_anchor,
                     nf,
                     pk_eph,
@@ -251,7 +251,7 @@ impl Envelope {
                     ct_out,
                     payout,
                     proof,
-                })
+                }))
             }
             KIND_MINT => {
                 let mut d = [0u8; DIVERSIFIER_LEN];
@@ -321,7 +321,7 @@ mod tests {
         );
         assert_eq!(
             Envelope::parse(&bytes).unwrap(),
-            Some(Envelope::Transfer(env.clone()))
+            Some(Envelope::Transfer(Box::new(env.clone())))
         );
         let mut bad = bytes.clone();
         bad.push(0);
