@@ -44,6 +44,9 @@ pub struct SentRecord {
 pub struct WalletFile {
     pub seed: String,
     pub funding_sk: String,
+    /// Operator only: the key holding the vault, separate from the fee key.
+    #[serde(default)]
+    pub vault_sk: String,
     pub notes: Vec<OwnedNote>,
     pub sent: Vec<SentRecord>,
     pub scanned_events: usize,
@@ -55,6 +58,7 @@ pub struct Wallet {
     pub file: WalletFile,
     pub keys: WalletKeys,
     pub funding: FundingKey,
+    vault: FundingKey,
 }
 
 fn fr_hex(x: &Fr) -> String {
@@ -67,18 +71,22 @@ fn d_from_hex(s: &str) -> Result<[u8; DIVERSIFIER_LEN]> {
     let v = hex::decode(s)?;
     v.as_slice().try_into().map_err(|_| anyhow!("bad diversifier"))
 }
+fn key_from_hex(s: &str) -> Result<[u8; 32]> {
+    hex::decode(s)?.as_slice().try_into().map_err(|_| anyhow!("bad key"))
+}
+fn random_hex() -> String {
+    let mut b = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    hex::encode(b)
+}
 
 impl Wallet {
     pub fn create(path: &Path) -> Result<Self> {
         ensure!(!path.exists(), "{} already exists", path.display());
-        let mut rng = rand::thread_rng();
-        let mut seed = [0u8; 32];
-        let mut fsk = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rng, &mut seed);
-        rand::RngCore::fill_bytes(&mut rng, &mut fsk);
         let file = WalletFile {
-            seed: hex::encode(seed),
-            funding_sk: hex::encode(fsk),
+            seed: random_hex(),
+            funding_sk: random_hex(),
+            vault_sk: random_hex(),
             notes: vec![],
             sent: vec![],
             scanned_events: 0,
@@ -90,14 +98,23 @@ impl Wallet {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        let file: WalletFile = serde_json::from_reader(std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?)?;
-        Self::from_file(path.to_path_buf(), file)
+        let mut file: WalletFile = serde_json::from_reader(std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?)?;
+        let fill = file.vault_sk.is_empty();
+        if fill {
+            file.vault_sk = random_hex();
+        }
+        let w = Self::from_file(path.to_path_buf(), file)?;
+        if fill {
+            w.save()?;
+        }
+        Ok(w)
     }
 
     fn from_file(path: std::path::PathBuf, file: WalletFile) -> Result<Self> {
         let seed: [u8; 32] = hex::decode(&file.seed)?.as_slice().try_into().map_err(|_| anyhow!("bad seed"))?;
-        let fsk: [u8; 32] = hex::decode(&file.funding_sk)?.as_slice().try_into().map_err(|_| anyhow!("bad funding key"))?;
-        Ok(Self { path, keys: WalletKeys::from_seed(seed), funding: FundingKey::from_bytes(&fsk)?, file })
+        let funding = FundingKey::from_bytes(&key_from_hex(&file.funding_sk).context("funding key")?)?;
+        let vault = FundingKey::from_bytes(&key_from_hex(&file.vault_sk).context("vault key")?)?;
+        Ok(Self { path, keys: WalletKeys::from_seed(seed), funding, vault, file })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -112,6 +129,10 @@ impl Wallet {
 
     pub fn address(&self) -> Address {
         self.keys.address(0)
+    }
+
+    pub fn vault(&self) -> FundingKey {
+        self.vault.clone()
     }
 
     pub fn balance(&self) -> u64 {
@@ -340,8 +361,9 @@ impl Wallet {
                 eprintln!("payout in {} asks {} sat but burned {} sat, skipping", t.txid, p.amount, n.v);
                 continue;
             }
-            let utxos = self.funding_utxos(e)?;
-            let tx = self.funding.build_carrier(
+            let mut utxos = e.listunspent(&self.vault.script_pubkey())?;
+            utxos.sort_by(|a, b| b.value.cmp(&a.value));
+            let tx = self.vault.build_carrier(
                 &utxos,
                 b"",
                 vec![TxOut { value: Amount::from_sat(p.amount), script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()) }],

@@ -153,21 +153,21 @@ fn main() -> Result<()> {
             let op = Wallet::open(operator_wallet)?;
             let dep = Deployment {
                 activation: *activation,
-                vault_script_pubkey: hex::encode(op.funding.script_pubkey().as_bytes()),
+                vault_script_pubkey: hex::encode(op.vault().script_pubkey().as_bytes()),
                 operator_address: op.address().encode(),
                 vk_fingerprint: params.vk_fingerprint(),
             };
             std::fs::create_dir_all(&cli.state)?;
             serde_json::to_writer_pretty(std::fs::File::create(cli.state.join("deployment.json"))?, &dep)?;
-            println!("activation {activation}\nvault {}\noperator {}\nvk {}", op.funding.address(), dep.operator_address, dep.vk_fingerprint);
+            println!("activation {activation}\nvault {}\noperator {}\nvk {}", op.vault().address(), dep.operator_address, dep.vk_fingerprint);
         }
         Cmd::Init { wallet } => {
             let w = Wallet::create(wallet)?;
-            println!("shielded {}\nfunding  {}", w.address().encode(), w.funding.address());
+            println!("shielded {}\nfunding  {}\nvault    {}", w.address().encode(), w.funding.address(), w.vault().address());
         }
         Cmd::Address { wallet } => {
             let w = Wallet::open(wallet)?;
-            println!("shielded {}\nfunding  {}", w.address().encode(), w.funding.address());
+            println!("shielded {}\nfunding  {}\nvault    {}", w.address().encode(), w.funding.address(), w.vault().address());
         }
         Cmd::Sync => {
             let params = Params::load_or_setup(&cli.params)?;
