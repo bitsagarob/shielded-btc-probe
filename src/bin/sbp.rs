@@ -62,6 +62,13 @@ enum Cmd {
         #[arg(long)]
         wallet: PathBuf,
     },
+    /// Release notes locked by a carrier that was dropped or reorged out.
+    Unlock {
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long)]
+        txid: String,
+    },
     /// Shielded transfer.
     Send {
         #[arg(long)]
@@ -153,21 +160,21 @@ fn main() -> Result<()> {
             let op = Wallet::open(operator_wallet)?;
             let dep = Deployment {
                 activation: *activation,
-                vault_script_pubkey: hex::encode(op.funding.script_pubkey().as_bytes()),
+                vault_script_pubkey: hex::encode(op.vault().script_pubkey().as_bytes()),
                 operator_address: op.address().encode(),
                 vk_fingerprint: params.vk_fingerprint(),
             };
             std::fs::create_dir_all(&cli.state)?;
             serde_json::to_writer_pretty(std::fs::File::create(cli.state.join("deployment.json"))?, &dep)?;
-            println!("activation {activation}\nvault {}\noperator {}\nvk {}", op.funding.address(), dep.operator_address, dep.vk_fingerprint);
+            println!("activation {activation}\nvault {}\noperator {}\nvk {}", op.vault().address(), dep.operator_address, dep.vk_fingerprint);
         }
         Cmd::Init { wallet } => {
             let w = Wallet::create(wallet)?;
-            println!("shielded {}\nfunding  {}", w.address().encode(), w.funding.address());
+            println!("shielded {}\nfunding  {}\nvault    {}", w.address().encode(), w.funding.address(), w.vault().address());
         }
         Cmd::Address { wallet } => {
             let w = Wallet::open(wallet)?;
-            println!("shielded {}\nfunding  {}", w.address().encode(), w.funding.address());
+            println!("shielded {}\nfunding  {}\nvault    {}", w.address().encode(), w.funding.address(), w.vault().address());
         }
         Cmd::Sync => {
             let params = Params::load_or_setup(&cli.params)?;
@@ -205,6 +212,11 @@ fn main() -> Result<()> {
             for s in &w.file.sent {
                 println!("  sent {:>10} sat in {} output {} to {}...", s.v, s.txid, s.j, &s.to[..20]);
             }
+        }
+        Cmd::Unlock { wallet, txid } => {
+            let mut w = Wallet::open(wallet)?;
+            let n = w.unlock(&txid.parse()?)?;
+            println!("unlocked {n} notes, balance {} sat", w.balance());
         }
         Cmd::Send { wallet, to, amount } => {
             let params = Params::load_or_setup(&cli.params)?;

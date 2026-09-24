@@ -1,23 +1,20 @@
 //! Wallet: owned notes, scanning against replayed state, minting (peg-in),
 //! building and publishing transfers, and the operator's peg-out handler.
 
-use crate::chain::{Electrum, FundingKey, Utxo};
+use crate::chain::{op_return_payload, Electrum, FundingKey, Utxo, FEE_RATE_SAT_VB, NETWORK};
 use crate::circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness};
 use crate::envelope::{Envelope, MintEnvelope, Payout, TransferEnvelope, CT_OUT_LEN};
 use crate::indexer::{Event, State};
-use crate::keys::{self, Address, WalletKeys, DIVERSIFIER_LEN};
+use crate::keys::{self, Address, SpendingKeys, WalletKeys, DIVERSIFIER_LEN};
 use crate::note::{self, NotePlaintext};
 use crate::prover::Params;
 use crate::tree::MerklePath;
-use crate::{Fr, Fs, N_IN, N_OUT, TREE_DEPTH};
+use crate::{Fr, Fs, N_IN, N_OUT, TREE_DEPTH, WINDOW_W};
 use anyhow::{anyhow, ensure, Context, Result};
-use ark_ff::{BigInteger, PrimeField, UniformRand};
-use bitcoin::{Amount, ScriptBuf, TxOut, Txid};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload as AeadPayload};
-use chacha20poly1305::ChaCha20Poly1305;
-use hkdf::Hkdf;
+use ark_ff::UniformRand;
+use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -34,6 +31,9 @@ pub struct OwnedNote {
     pub spent: bool,
     /// Set while a spend is published but not yet replayed.
     pub locked_by: Option<Txid>,
+    /// Anchor of that spend; the lock lapses once the anchor window has passed.
+    #[serde(default)]
+    pub lock_anchor: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,10 +48,20 @@ pub struct SentRecord {
 pub struct WalletFile {
     pub seed: String,
     pub funding_sk: String,
+    /// Operator only: the key holding the vault, separate from the fee key.
+    #[serde(default)]
+    pub vault_sk: String,
     pub notes: Vec<OwnedNote>,
     pub sent: Vec<SentRecord>,
     pub scanned_events: usize,
-    pub paid_payouts: Vec<Txid>,
+    /// Txid of the last scanned event; a mismatch means replay history changed.
+    #[serde(default)]
+    pub scanned_txid: Option<Txid>,
+    /// Peg-out requests paid, keyed by hex of nf[0] (older files hold carrier txids).
+    pub paid_payouts: Vec<String>,
+    /// Peg-out requests refused or failed, hex of nf[0] to the reason.
+    #[serde(default)]
+    pub failed_payouts: BTreeMap<String, String>,
 }
 
 pub struct Wallet {
@@ -59,6 +69,7 @@ pub struct Wallet {
     pub file: WalletFile,
     pub keys: WalletKeys,
     pub funding: FundingKey,
+    vault: FundingKey,
 }
 
 fn fr_hex(x: &Fr) -> String {
@@ -71,22 +82,49 @@ fn d_from_hex(s: &str) -> Result<[u8; DIVERSIFIER_LEN]> {
     let v = hex::decode(s)?;
     v.as_slice().try_into().map_err(|_| anyhow!("bad diversifier"))
 }
+fn key_from_hex(s: &str) -> Result<[u8; 32]> {
+    hex::decode(s)?.as_slice().try_into().map_err(|_| anyhow!("bad key"))
+}
+fn random_hex() -> String {
+    let mut b = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    hex::encode(b)
+}
+fn event_txid(ev: &Event) -> Txid {
+    match ev {
+        Event::Mint(m) => m.txid,
+        Event::Transfer(t) => t.txid,
+    }
+}
+fn input_witness(n: &OwnedNote, path: MerklePath) -> Result<InputWitness> {
+    Ok(InputWitness {
+        enabled: true,
+        is_mint: n.is_mint,
+        v: n.v,
+        d: d_from_hex(&n.d)?,
+        r_seed: fr_from_hex(&n.r_seed)?,
+        h_body_create: fr_from_hex(&n.h_body_create)?,
+        j: n.j,
+        path,
+    })
+}
+fn own_nullifier(der: &SpendingKeys, n: &OwnedNote) -> Result<Fr> {
+    Ok(note::nullifier(&der.sk_nf, &note::rho(&fr_from_hex(&n.r_seed)?), n.pos))
+}
 
 impl Wallet {
     pub fn create(path: &Path) -> Result<Self> {
         ensure!(!path.exists(), "{} already exists", path.display());
-        let mut rng = rand::thread_rng();
-        let mut seed = [0u8; 32];
-        let mut fsk = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rng, &mut seed);
-        rand::RngCore::fill_bytes(&mut rng, &mut fsk);
         let file = WalletFile {
-            seed: hex::encode(seed),
-            funding_sk: hex::encode(fsk),
+            seed: random_hex(),
+            funding_sk: random_hex(),
+            vault_sk: random_hex(),
             notes: vec![],
             sent: vec![],
             scanned_events: 0,
+            scanned_txid: None,
             paid_payouts: vec![],
+            failed_payouts: BTreeMap::new(),
         };
         let w = Self::from_file(path.to_path_buf(), file)?;
         w.save()?;
@@ -94,25 +132,41 @@ impl Wallet {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        let file: WalletFile = serde_json::from_reader(std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?)?;
-        Self::from_file(path.to_path_buf(), file)
+        let mut file: WalletFile = serde_json::from_reader(std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?)?;
+        let fill = file.vault_sk.is_empty();
+        if fill {
+            file.vault_sk = random_hex();
+        }
+        let w = Self::from_file(path.to_path_buf(), file)?;
+        if fill {
+            w.save()?;
+        }
+        Ok(w)
     }
 
     fn from_file(path: std::path::PathBuf, file: WalletFile) -> Result<Self> {
         let seed: [u8; 32] = hex::decode(&file.seed)?.as_slice().try_into().map_err(|_| anyhow!("bad seed"))?;
-        let fsk: [u8; 32] = hex::decode(&file.funding_sk)?.as_slice().try_into().map_err(|_| anyhow!("bad funding key"))?;
-        Ok(Self { path, keys: WalletKeys::from_seed(seed), funding: FundingKey::from_bytes(&fsk)?, file })
+        let funding = FundingKey::from_bytes(&key_from_hex(&file.funding_sk).context("funding key")?)?;
+        let vault = FundingKey::from_bytes(&key_from_hex(&file.vault_sk).context("vault key")?)?;
+        Ok(Self { path, keys: WalletKeys::from_seed(seed), funding, vault, file })
     }
 
     pub fn save(&self) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
         let tmp = self.path.with_extension("json.tmp");
-        serde_json::to_writer_pretty(std::fs::File::create(&tmp)?, &self.file)?;
+        let f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        serde_json::to_writer_pretty(&f, &self.file)?;
+        f.sync_all()?;
         std::fs::rename(tmp, &self.path)?;
         Ok(())
     }
 
     pub fn address(&self) -> Address {
         self.keys.address(0)
+    }
+
+    pub fn vault(&self) -> FundingKey {
+        self.vault.clone()
     }
 
     pub fn balance(&self) -> u64 {
@@ -122,13 +176,34 @@ impl Wallet {
     /// Paper 16.1 and 16.2 against the indexer's accepted history.
     pub fn scan(&mut self, state: &State) -> Result<usize> {
         let der = self.keys.derive();
+        let cursor = self.file.scanned_events;
+        let anchored = self.file.scanned_txid.is_some_and(|t| state.events.get(cursor.wrapping_sub(1)).is_some_and(|ev| event_txid(ev) == t));
+        if cursor > 0 && !anchored {
+            eprintln!("replayed history changed under the wallet, rescanning from activation");
+            self.file.notes.clear();
+            self.file.sent.clear();
+            self.file.scanned_events = 0;
+        }
+        // Paper C.4: every local record must still describe the accepted leaf.
+        let mut kept = Vec::with_capacity(self.file.notes.len());
+        for n in self.file.notes.drain(..) {
+            let leaf = circuit::input_leaf(&der.sk_spend, &input_witness(&n, MerklePath { pos: n.pos, siblings: vec![] })?);
+            if leaf.is_some() && state.tree.leaf(n.pos) == leaf {
+                kept.push(n);
+            } else {
+                eprintln!("dropping note at position {}: no longer matches the replayed leaf", n.pos);
+                self.file.scanned_events = 0;
+            }
+        }
+        self.file.notes = kept;
+        let mut nfs: HashSet<Fr> = self.file.notes.iter().map(|n| own_nullifier(&der, n)).collect::<Result<_>>()?;
         let mut found = 0;
         for ev in &state.events[self.file.scanned_events..] {
             match ev {
                 Event::Mint(m) => {
                     let env = m.envelope();
                     if keys::address_for(&der, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
-                        self.file.notes.push(OwnedNote {
+                        let n = OwnedNote {
                             v: m.value,
                             d: hex::encode(env.d),
                             r_seed: fr_hex(&env.r_seed),
@@ -139,18 +214,23 @@ impl Wallet {
                             source_txid: m.txid,
                             spent: false,
                             locked_by: None,
-                        });
-                        found += 1;
+                            lock_anchor: None,
+                        };
+                        found += self.record(&der, &mut nfs, n)? as usize;
                     }
                 }
                 Event::Transfer(t) => {
                     let env = t.envelope();
                     let h_body = env.h_body();
                     for j in 0..N_OUT {
-                        let Some(n) = note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &der.sk_view) else { continue };
                         let leaf = note::leaf(&h_body, j as u8, &env.pk_eph[j], &env.ct[j]);
                         ensure!(state.tree.leaf(t.positions[j]) == Some(leaf), "replay leaf mismatch at {}", t.positions[j]);
-                        self.file.notes.push(OwnedNote {
+                    }
+                    for j in 0..N_OUT {
+                        let Some(n) = note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &der.sk_view) else { continue };
+                        // Output 0 of a transfer carrying a payout is the peg-out burn.
+                        let burned = j == 0 && env.payout.is_some();
+                        let n = OwnedNote {
                             v: n.v,
                             d: hex::encode(n.d),
                             r_seed: fr_hex(&n.r_seed),
@@ -159,14 +239,18 @@ impl Wallet {
                             j: j as u8,
                             pos: t.positions[j],
                             source_txid: t.txid,
-                            spent: false,
+                            spent: burned,
                             locked_by: None,
-                        });
-                        found += 1;
+                            lock_anchor: None,
+                        };
+                        found += self.record(&der, &mut nfs, n)? as usize;
                     }
-                    // Sender-side recovery of our own transfers.
-                    if let Some(records) = self.decrypt_ct_out(&env, &der.vk_out) {
-                        for (j, (pk_d, sk_eph)) in records.iter().enumerate() {
+                    // Sender-side recovery, only for transfers that spend a note of ours.
+                    if !env.nf.iter().any(|nf| nfs.contains(nf)) {
+                        continue;
+                    }
+                    if let Some(records) = note::decrypt_recovery(&env.ct_out, &env.recovery_binding(), &der.vk_out) {
+                        for (j, (pk_d, sk_eph)) in records.iter().take(N_OUT).enumerate() {
                             if let Some(n) = note::decrypt_as_sender(&env.ct[j], &env.pk_eph[j], pk_d, sk_eph) {
                                 if self.file.sent.iter().all(|s| !(s.txid == t.txid && s.j == j as u8)) {
                                     let to = Address { d: n.d, pk_d: *pk_d }.encode();
@@ -179,50 +263,43 @@ impl Wallet {
             }
         }
         self.file.scanned_events = state.events.len();
-        // Spent status and lock release come from the nullifier set.
+        self.file.scanned_txid = state.events.last().map(event_txid);
+        // Spent status from the nullifier set; a lock whose anchor window has
+        // passed without the nullifier appearing can never be replayed.
         for n in &mut self.file.notes {
-            let nf = note::nullifier(&der.sk_nf, &note::rho(&fr_from_hex(&n.r_seed)?), n.pos);
-            if state.nullifiers.contains(&nf) {
+            if state.nullifiers.contains(&own_nullifier(&der, n)?) {
                 n.spent = true;
                 n.locked_by = None;
+                n.lock_anchor = None;
+            } else if n.lock_anchor.is_some_and(|a| state.replayed_height > a + WINDOW_W) {
+                n.locked_by = None;
+                n.lock_anchor = None;
             }
         }
         self.save()?;
         Ok(found)
     }
 
-    fn ct_out_key(vk_out: &[u8; 32], binding: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
-        let hk = Hkdf::<Sha256>::new(Some(binding), vk_out);
-        let mut key = [0u8; 32];
-        let mut nonce = [0u8; 12];
-        hk.expand(b"sbp/ctout/key", &mut key).expect("valid length");
-        hk.expand(b"sbp/ctout/nonce", &mut nonce).expect("valid length");
-        (key, nonce)
+    /// Adds a scanned note unless it is empty or already recorded.
+    fn record(&mut self, der: &SpendingKeys, nfs: &mut HashSet<Fr>, n: OwnedNote) -> Result<bool> {
+        if n.v == 0 || self.file.notes.iter().any(|o| o.source_txid == n.source_txid && o.j == n.j) {
+            return Ok(false);
+        }
+        nfs.insert(own_nullifier(der, &n)?);
+        self.file.notes.push(n);
+        Ok(true)
     }
 
-    fn encrypt_ct_out(&self, binding: &[u8; 32], records: &[(crate::EdwardsAffine, Fs); N_OUT]) -> Vec<u8> {
-        let (key, nonce) = Self::ct_out_key(&self.keys.derive().vk_out, binding);
-        let mut pt = Vec::with_capacity(N_OUT * 64);
-        for (pk_d, s) in records {
-            pt.extend_from_slice(&keys::point_to_bytes(pk_d));
-            pt.extend_from_slice(&s.into_bigint().to_bytes_le());
+    /// Releases notes locked by a carrier that will never be replayed.
+    pub fn unlock(&mut self, txid: &Txid) -> Result<usize> {
+        let mut n = 0;
+        for note in self.file.notes.iter_mut().filter(|n| n.locked_by == Some(*txid)) {
+            note.locked_by = None;
+            note.lock_anchor = None;
+            n += 1;
         }
-        let cipher = ChaCha20Poly1305::new((&key).into());
-        cipher.encrypt((&nonce).into(), AeadPayload { msg: &pt, aad: binding }).expect("aead")
-    }
-
-    fn decrypt_ct_out(&self, env: &TransferEnvelope, vk_out: &[u8; 32]) -> Option<Vec<(crate::EdwardsAffine, Fs)>> {
-        let binding = env.recovery_binding();
-        let (key, nonce) = Self::ct_out_key(vk_out, &binding);
-        let cipher = ChaCha20Poly1305::new((&key).into());
-        let pt = cipher.decrypt((&nonce).into(), AeadPayload { msg: &env.ct_out, aad: &binding }).ok()?;
-        let mut out = Vec::with_capacity(N_OUT);
-        for chunk in pt.chunks(64) {
-            let pk_d = keys::point_from_bytes(&chunk[..32])?;
-            let s = Fs::from_le_bytes_mod_order(&chunk[32..]);
-            out.push((pk_d, s));
-        }
-        Some(out)
+        self.save()?;
+        Ok(n)
     }
 
     pub fn funding_utxos(&self, e: &mut Electrum) -> Result<Vec<Utxo>> {
@@ -260,6 +337,7 @@ impl Wallet {
         amount: u64,
         payout: Option<Payout>,
     ) -> Result<(Txid, usize, usize, f64)> {
+        ensure!(amount > 0, "amount must be positive");
         let der = self.keys.derive();
         // Input selection: up to two unspent, unlocked notes.
         let mut candidates: Vec<usize> = (0..self.file.notes.len())
@@ -281,16 +359,7 @@ impl Wallet {
         for &i in &chosen {
             let n = &self.file.notes[i];
             let path = state.tree.path(n.pos).ok_or_else(|| anyhow!("note position {} not in tree", n.pos))?;
-            let inp = InputWitness {
-                enabled: true,
-                is_mint: n.is_mint,
-                v: n.v,
-                d: d_from_hex(&n.d)?,
-                r_seed: fr_from_hex(&n.r_seed)?,
-                h_body_create: fr_from_hex(&n.h_body_create)?,
-                j: n.j,
-                path,
-            };
+            let inp = input_witness(n, path)?;
             // Paper C.4: the local record must still describe the accepted leaf.
             ensure!(
                 circuit::input_leaf(&der.sk_spend, &inp).is_some_and(|leaf| state.tree.leaf(n.pos) == Some(leaf)),
@@ -336,7 +405,7 @@ impl Wallet {
             payout,
             proof: vec![],
         };
-        env.ct_out = self.encrypt_ct_out(&env.recovery_binding(), &records);
+        env.ct_out = note::encrypt_recovery(&records, &env.recovery_binding(), &der.vk_out);
         ensure!(env.ct_out.len() == CT_OUT_LEN, "ct_out length");
         w.h_body = env.h_body();
         let public = PublicInputs { r_anchor, digest: env.statement_digest() };
@@ -352,42 +421,88 @@ impl Wallet {
         let txid = e.broadcast(&tx)?;
         for &i in &chosen {
             self.file.notes[i].locked_by = Some(txid);
+            self.file.notes[i].lock_anchor = Some(h_anchor);
         }
         self.save()?;
         Ok((txid, payload.len(), vsize, prove_s))
     }
 
     /// Operator only: pay every accepted peg-out request addressed to us
-    /// that has not been paid yet. Returns the payouts made.
+    /// that has not been paid yet. The fee comes out of the request. Returns
+    /// (request txid, sat paid, payout txid) per payout made.
     pub fn process_payouts(&mut self, e: &mut Electrum, state: &State) -> Result<Vec<(Txid, u64, Txid)>> {
         let der = self.keys.derive();
+        // Payout carriers publish nf[0] in their OP_RETURN, so the chain itself
+        // says what was already paid.
+        let mut on_chain: HashSet<Vec<u8>> = HashSet::new();
+        for txid in e.history(&self.vault.script_pubkey())? {
+            if let Ok(Some(p)) = op_return_payload(&e.transaction(&txid)?) {
+                on_chain.insert(p);
+            }
+        }
         let mut done = Vec::new();
         for ev in &state.events {
             let Event::Transfer(t) = ev else { continue };
-            if self.file.paid_payouts.contains(&t.txid) {
-                continue;
-            }
             let env = t.envelope();
             let Some(p) = &env.payout else { continue };
-            // Convention: the burned value is output 0, sent to the operator.
-            let Some(n) = note::decrypt_as_recipient(&env.ct[0], &env.pk_eph[0], &der.sk_view) else { continue };
-            if p.amount > n.v {
-                eprintln!("payout in {} asks {} sat but burned {} sat, skipping", t.txid, p.amount, n.v);
+            let nf = keys::fr_to_bytes(&env.nf[0]);
+            let key = hex::encode(nf);
+            if self.file.paid_payouts.contains(&key) || self.file.paid_payouts.contains(&t.txid.to_string()) || self.file.failed_payouts.contains_key(&key) {
                 continue;
             }
-            let utxos = self.funding_utxos(e)?;
-            let tx = self.funding.build_carrier(
-                &utxos,
-                b"",
-                vec![TxOut { value: Amount::from_sat(p.amount), script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()) }],
-            )?;
-            let paid = e.broadcast(&tx)?;
-            self.file.paid_payouts.push(t.txid);
+            // Convention: the burned value is output 0, sent to the operator.
+            let Some(n) = note::decrypt_as_recipient(&env.ct[0], &env.pk_eph[0], &der.sk_view) else { continue };
+            if on_chain.contains(&nf[..]) {
+                self.file.paid_payouts.push(key);
+                self.save()?;
+                continue;
+            }
+            let tx = match validate_payout(p, n.v).and_then(|_| self.build_payout(e, p, &nf)) {
+                Ok(tx) => tx,
+                Err(err) => {
+                    self.fail_payout(&t.txid, key, err.into())?;
+                    continue;
+                }
+            };
+            // Intent on disk before the network sees the transaction.
+            self.file.paid_payouts.push(key.clone());
             self.save()?;
-            done.push((t.txid, p.amount, paid));
+            match e.broadcast(&tx) {
+                Ok(paid) => done.push((t.txid, tx.output[0].value.to_sat(), paid)),
+                Err(err) => {
+                    self.file.paid_payouts.retain(|k| k != &key);
+                    self.fail_payout(&t.txid, key, err.into())?;
+                }
+            }
         }
         Ok(done)
     }
+
+    fn build_payout(&self, e: &mut Electrum, p: &Payout, nf: &[u8]) -> Result<Transaction> {
+        let mut utxos = e.listunspent(&self.vault.script_pubkey())?;
+        utxos.sort_by(|a, b| b.value.cmp(&a.value));
+        let out = |v: u64| vec![TxOut { value: Amount::from_sat(v), script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()) }];
+        let fee = self.vault.build_carrier(&utxos, nf, out(p.amount))?.vsize() as u64 * FEE_RATE_SAT_VB;
+        ensure!(p.amount >= fee + 546, "{} sat does not cover the {fee} sat fee plus dust", p.amount);
+        self.vault.build_carrier(&utxos, nf, out(p.amount - fee))
+    }
+
+    fn fail_payout(&mut self, txid: &Txid, key: String, err: anyhow::Error) -> Result<()> {
+        eprintln!("payout in {txid} not paid: {err:#}");
+        self.file.failed_payouts.insert(key, format!("{err:#}"));
+        self.save()
+    }
+}
+
+/// A peg-out request must not exceed the burn, must clear dust, and must
+/// pay a standard single-key or script-hash output.
+pub fn validate_payout(p: &Payout, burned: u64) -> Result<()> {
+    ensure!(p.amount <= burned, "asks {} sat but burned {burned} sat", p.amount);
+    ensure!(p.amount >= 546, "{} sat is below dust", p.amount);
+    let s = bitcoin::Script::from_bytes(&p.script_pubkey);
+    ensure!(s.is_p2wpkh() || s.is_p2tr() || s.is_p2sh() || s.is_p2pkh(), "non-standard payout script");
+    bitcoin::Address::from_script(s, NETWORK).context("payout script")?;
+    Ok(())
 }
 
 pub fn parse_address(s: &str) -> Result<Address> {

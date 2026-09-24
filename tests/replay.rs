@@ -32,7 +32,7 @@ fn transfer(h_anchor: u32) -> TransferEnvelope {
     let w = WalletKeys::from_seed([3u8; 32]);
     let a = w.address(0);
     let n = NotePlaintext { v: 5, d: a.d, r_seed: Fr::from(8u64) };
-    let (pk, ct) = encrypt(&n, &a.pk_d);
+    let (pk, ct) = encrypt(&n, &a.pk_d).unwrap();
     TransferEnvelope { h_anchor, nf: [Fr::from(1u64), Fr::from(2u64)], pk_eph: [pk, pk], ct: [ct, ct], ct_out: vec![9u8; CT_OUT_LEN], payout: None, proof: vec![0u8; PROOF_LEN] }
 }
 
@@ -80,7 +80,7 @@ fn anchor_window_bounds_hold_and_never_overflow() {
     for a in [h - 101, h, u32::MAX] {
         assert_eq!(replay(&mut st, h, vec![push(&transfer(a).to_bytes())]), Err(RejectReason::AnchorOutsideWindow { anchor: a, height: h }), "anchor {a}");
     }
-    assert_eq!(st.tree.len, 0);
+    assert_eq!(st.tree.len(), 0);
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn noncanonical_point_encoding_is_rejected() {
     assert_eq!(Envelope::parse(&canon).unwrap(), Some(Envelope::Mint(m)));
     let mut st = State::fresh(dep());
     assert!(matches!(replay(&mut st, 1000, vec![pay_vault(1), push(&wire)]), Err(RejectReason::Parse(_))));
-    assert_eq!(st.tree.len, 0);
+    assert_eq!(st.tree.len(), 0);
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn malformed_magic_carriers_are_recorded_not_skipped() {
     let r = replay(&mut st, 1000, two).unwrap_err();
     assert_eq!(r, RejectReason::Carrier("more than one OP_RETURN output"));
     assert_eq!(r.to_string(), "carrier: more than one OP_RETURN output");
-    assert_eq!(st.tree.len, 0);
+    assert_eq!(st.tree.len(), 0);
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn same_mint_twice_is_two_notes() {
     let m = mint().to_bytes();
     replay(&mut st, 1000, vec![pay_vault(1), push(&m)]).unwrap();
     replay(&mut st, 1000, vec![pay_vault(1), push(&m)]).unwrap();
-    assert_eq!(st.tree.len, 2);
+    assert_eq!(st.tree.len(), 2);
     assert_eq!(st.tree.leaf(0), st.tree.leaf(1));
     assert_eq!(replay(&mut st, 1000, vec![push(&m)]), Err(RejectReason::MintUnfunded));
     assert_eq!(st.events.len(), 2);
