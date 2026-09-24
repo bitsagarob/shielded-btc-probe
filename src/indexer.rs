@@ -230,7 +230,8 @@ impl State {
     /// Paper A.7 order: parse (done), binding, anchor window, nullifiers,
     /// proof, then mutate.
     fn accept_transfer(&mut self, params: &Params, h: u32, txid: Txid, t: &TransferEnvelope, payload: &[u8]) -> std::result::Result<(), RejectReason> {
-        if t.h_anchor + WINDOW_W < h || t.h_anchor + K_MIN > h {
+        let (anchor, height) = (u64::from(t.h_anchor), u64::from(h));
+        if anchor + u64::from(WINDOW_W) < height || anchor + u64::from(K_MIN) > height {
             return Err(RejectReason::AnchorOutsideWindow { anchor: t.h_anchor, height: h });
         }
         let r_anchor = *self.roots.get(&t.h_anchor).ok_or(RejectReason::NoRetainedRoot(t.h_anchor))?;
