@@ -196,8 +196,9 @@ impl Electrum {
 }
 
 impl Electrum {
-    /// Every txid touching a script, confirmed and mempool, oldest first.
-    pub fn history(&mut self, spk: &ScriptBuf) -> Result<Vec<Txid>, Error> {
+    /// Every (txid, height) touching a script, oldest first. Height is zero
+    /// or negative for mempool entries.
+    pub fn history(&mut self, spk: &ScriptBuf) -> Result<Vec<(Txid, i64)>, Error> {
         let v = self.call(
             "blockchain.scripthash.get_history",
             json!([scripthash(spk)]),
@@ -207,11 +208,12 @@ impl Electrum {
             .ok_or_else(|| Error::Protocol("get_history not an array".into()))?;
         arr.iter()
             .map(|h| {
-                h["tx_hash"]
+                let txid = h["tx_hash"]
                     .as_str()
                     .unwrap_or_default()
                     .parse()
-                    .map_err(|_| Error::Protocol("bad txid in history".into()))
+                    .map_err(|_| Error::Protocol("bad txid in history".into()))?;
+                Ok((txid, h["height"].as_i64().unwrap_or(0)))
             })
             .collect()
     }

@@ -17,7 +17,7 @@ use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid, address::FromScriptEr
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::Instant,
@@ -129,6 +129,9 @@ pub struct WalletFile {
     /// Peg-out requests refused or failed, hex of nf[0] to the reason.
     #[serde(default)]
     pub failed_payouts: BTreeMap<String, String>,
+    /// Payout transactions this wallet broadcast.
+    #[serde(default)]
+    pub payout_txids: Vec<Txid>,
 }
 
 pub struct Wallet {
@@ -181,6 +184,7 @@ impl Wallet {
             scanned_txid: None,
             paid_payouts: vec![],
             failed_payouts: BTreeMap::new(),
+            payout_txids: vec![],
         };
         let w = Self::from_file(path.to_path_buf(), file)?;
         w.save()?;
@@ -619,12 +623,30 @@ impl Wallet {
         state: &State,
     ) -> Result<Vec<(Txid, u64, Txid)>, Error> {
         let der = self.keys.derive();
-        // Payout carriers publish nf[0] in their OP_RETURN, so the chain itself
-        // says what was already paid.
+        let vault_spk = self.vault.script_pubkey();
+        // Payout carriers spend the vault and publish nf[0] in their OP_RETURN,
+        // so the chain itself says what was already paid. Mempool entries only
+        // count when this wallet broadcast them.
         let mut on_chain: HashSet<Vec<u8>> = HashSet::new();
-        for txid in client.history(&self.vault.script_pubkey())? {
-            if let Ok(Some(p)) = op_return_payload(&client.transaction(&txid)?) {
-                on_chain.insert(p);
+        let mut fetched: HashMap<Txid, Transaction> = HashMap::new();
+        let history = client.history(&vault_spk)?;
+        let mut fetch = |id: &Txid| -> Result<Transaction, Error> {
+            if let Some(tx) = fetched.get(id) {
+                return Ok(tx.clone());
+            }
+            let tx = client.transaction(id)?;
+            fetched.insert(*id, tx.clone());
+            Ok(tx)
+        };
+        for (txid, height) in history {
+            if height <= 0 && !self.file.payout_txids.contains(&txid) {
+                continue;
+            }
+            let tx = fetch(&txid)?;
+            if let Ok(Some(p)) = op_return_payload(&tx) {
+                if spends_vault(&tx, &vault_spk, &mut fetch)? {
+                    on_chain.insert(p);
+                }
             }
         }
         let mut done = Vec::new();
@@ -661,7 +683,11 @@ impl Wallet {
             self.file.paid_payouts.push(key.clone());
             self.save()?;
             match client.broadcast(&tx) {
-                Ok(paid) => done.push((t.txid, tx.output[0].value.to_sat(), paid)),
+                Ok(paid) => {
+                    self.file.payout_txids.push(paid);
+                    self.save()?;
+                    done.push((t.txid, tx.output[0].value.to_sat(), paid));
+                }
                 Err(err) => {
                     self.file.paid_payouts.retain(|k| k != &key);
                     self.fail_payout(&t.txid, key, err.into())?;
@@ -721,6 +747,28 @@ pub fn validate_payout(p: &Payout, burned: u64) -> Result<(), Error> {
     }
     bitcoin::Address::from_script(s, NETWORK)?;
     Ok(())
+}
+
+/// Whether `tx` spends an output paying `vault`; `prev` fetches the
+/// transaction an input references.
+pub fn spends_vault(
+    tx: &Transaction,
+    vault: &ScriptBuf,
+    prev: &mut impl FnMut(&Txid) -> Result<Transaction, Error>,
+) -> Result<bool, Error> {
+    if tx.is_coinbase() {
+        return Ok(false);
+    }
+    for i in &tx.input {
+        let p = prev(&i.previous_output.txid)?;
+        if p.output
+            .get(i.previous_output.vout as usize)
+            .is_some_and(|o| o.script_pubkey == *vault)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn note_plaintext(n: &OwnedNote) -> NotePlaintext {

@@ -1,15 +1,18 @@
 //! Wallet behaviour against hand-built replay state. Nothing here
 //! broadcasts; the payout test reads Fulcrum with a vault that owns nothing.
 
-use bitcoin::{Txid, hashes::Hash};
+use bitcoin::{
+    Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
+    hashes::Hash, script::PushBytesBuf, transaction,
+};
 use shielded_probe::{
     Fr, WINDOW_W,
-    chain::{DEFAULT_ELECTRUM, Electrum, FundingKey},
+    chain::{DEFAULT_ELECTRUM, Electrum, FundingKey, op_return_payload},
     envelope::{CT_OUT_LEN, PROOF_LEN, Payout, TransferEnvelope, recovery_binding},
     indexer::{AcceptedMint, AcceptedTransfer, Deployment, Event, State},
     keys::Address,
     note::{self, NotePlaintext},
-    wallet::{Wallet, validate_payout},
+    wallet::{Wallet, spends_vault, validate_payout},
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -515,4 +518,57 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     assert_eq!(op.file.paid_payouts, vec![old.to_string()]);
     let again = Wallet::open(&op.path).unwrap();
     assert_eq!(again.file.failed_payouts.len(), 3);
+}
+
+#[test]
+fn a_stranger_paying_the_vault_with_nf_in_op_return_is_not_a_payout() {
+    let op = Wallet::create(&tmp("op11")).unwrap();
+    let vault = op.vault().script_pubkey();
+    let nf = shielded_probe::keys::fr_to_bytes(&Fr::from(42u64));
+    let funded = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: FundingKey::from_bytes(&[8u8; 32]).unwrap().script_pubkey(),
+            },
+            TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: vault.clone(),
+            },
+        ],
+    };
+    let spend = |vout: u32| Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::new(funded.compute_txid(), vout),
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(294),
+                script_pubkey: vault.clone(),
+            },
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::new_op_return(
+                    PushBytesBuf::try_from(nf.to_vec()).unwrap(),
+                ),
+            },
+        ],
+    };
+    let mut prev = |id: &Txid| {
+        assert_eq!(*id, funded.compute_txid());
+        Ok(funded.clone())
+    };
+    // The stranger's transaction carries the same OP_RETURN as a real payout.
+    let forged = spend(0);
+    assert_eq!(op_return_payload(&forged), Ok(Some(nf.to_vec())));
+    assert!(!spends_vault(&forged, &vault, &mut prev).unwrap());
+    assert!(spends_vault(&spend(1), &vault, &mut prev).unwrap());
 }
