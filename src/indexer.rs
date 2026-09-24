@@ -207,7 +207,7 @@ impl State {
         let tip = e.tip_height()?;
         if let Some(h) = self.block_hashes.get(&self.replayed_height).copied() {
             if e.block_hash(self.replayed_height)? != h {
-                eprintln!(
+                log::warn!(
                     "reorganisation at or below {}: replaying from activation",
                     self.replayed_height
                 );

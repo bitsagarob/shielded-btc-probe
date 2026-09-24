@@ -404,6 +404,6 @@ mod tests {
         let tx = k.build_carrier(&utxos, &payload, vec![]).unwrap();
         assert_eq!(op_return_payload(&tx), Ok(Some(payload)));
         assert_eq!(tx.output.len(), 2);
-        eprintln!("carrier vsize {} vB for a 700 byte envelope", tx.vsize());
+        log::info!("carrier vsize {} vB for a 700 byte envelope", tx.vsize());
     }
 }

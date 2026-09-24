@@ -257,7 +257,7 @@ impl Wallet {
                 .is_some_and(|ev| event_txid(ev) == t)
         });
         if cursor > 0 && !anchored {
-            eprintln!("replayed history changed under the wallet, rescanning from activation");
+            log::warn!("replayed history changed under the wallet, rescanning from activation");
             self.file.notes.clear();
             self.file.sent.clear();
             self.file.scanned_events = 0;
@@ -278,7 +278,7 @@ impl Wallet {
             if leaf.is_some() && state.tree.leaf(n.pos) == leaf {
                 kept.push(n);
             } else {
-                eprintln!(
+                log::warn!(
                     "dropping note at position {}: no longer matches the replayed leaf",
                     n.pos
                 );
@@ -691,7 +691,7 @@ impl Wallet {
     }
 
     fn fail_payout(&mut self, txid: &Txid, key: String, err: Error) -> Result<(), Error> {
-        eprintln!("payout in {txid} not paid: {err}");
+        log::warn!("payout in {txid} not paid: {err}");
         self.file.failed_payouts.insert(key, err.to_string());
         self.save()
     }

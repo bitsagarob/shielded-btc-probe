@@ -137,7 +137,7 @@ fn synced_state(cli: &Cli, params: &Params) -> Result<(State, Electrum)> {
     let n = st.sync(&mut e, params)?;
     st.save(&cli.state.join("state.json"))?;
     if n > 0 {
-        eprintln!(
+        log::info!(
             "replayed {n} blocks in {:.1}s, now at {}",
             t.elapsed().as_secs_f64(),
             st.replayed_height
@@ -147,6 +147,7 @@ fn synced_state(cli: &Cli, params: &Params) -> Result<(State, Electrum)> {
 }
 
 fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
     match &cli.cmd {
         Cmd::Bench => {
