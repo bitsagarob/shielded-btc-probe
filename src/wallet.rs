@@ -6,7 +6,7 @@ use crate::{
     chain::{self, Electrum, FEE_RATE_SAT_VB, FundingKey, NETWORK, Utxo, op_return_payload},
     circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness},
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, Payout, TransferEnvelope},
-    indexer::{Event, State},
+    indexer::{self, Event, State},
     keys::{self, Address, DIVERSIFIER_LEN, SpendingKeys, WalletKeys},
     note::{self, NotePlaintext},
     prover::{self, Params},
@@ -44,6 +44,8 @@ pub enum Error {
     Chain(#[from] chain::Error),
     #[error(transparent)]
     Prover(#[from] prover::Error),
+    #[error(transparent)]
+    Indexer(#[from] indexer::Error),
     #[error("replay leaf mismatch at {0}")]
     LeafMismatch(u64),
     #[error("amount must be positive")]
@@ -302,7 +304,7 @@ impl Wallet {
         for ev in &state.events[self.file.scanned_events..] {
             match ev {
                 Event::Mint(m) => {
-                    let env = m.envelope();
+                    let env = m.envelope()?;
                     if keys::address_for(&der, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
                         let n = OwnedNote {
                             v: m.value,
@@ -321,7 +323,7 @@ impl Wallet {
                     }
                 }
                 Event::Transfer(t) => {
-                    let env = t.envelope();
+                    let env = t.envelope()?;
                     let h_body = env.h_body();
                     for j in 0..N_OUT {
                         let leaf = note::leaf(&h_body, j as u8, &env.pk_eph[j], &env.ct[j]);
@@ -654,7 +656,7 @@ impl Wallet {
         let mut done = Vec::new();
         for ev in &state.events {
             let Event::Transfer(t) = ev else { continue };
-            let env = t.envelope();
+            let env = t.envelope()?;
             let Some(p) = &env.payout else { continue };
             let nf = keys::fr_to_bytes(&env.nf[0]);
             let key = hex::encode(nf);

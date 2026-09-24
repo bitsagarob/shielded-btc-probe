@@ -594,3 +594,31 @@ fn burn_marking_spares_non_operator_recipients() {
     assert!(!alice.file.notes[0].spent);
     assert_eq!(alice.balance(), 2000);
 }
+
+#[test]
+fn hostile_state_event_bytes_are_an_error_not_a_panic() {
+    let op = Wallet::create(&tmp("op13")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice13")).unwrap();
+    let mut st = fresh_state(&op);
+    st.events.push(Event::Transfer(AcceptedTransfer {
+        txid: Txid::all_zeros(),
+        height: 11,
+        bytes: vec![1, 2, 3],
+        positions: [0, 1],
+    }));
+    let p = tmp("state13");
+    st.save(&p).unwrap();
+    let st = State::load(&p).unwrap();
+    assert!(alice.scan(&st).is_err());
+    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    assert!(alice.process_payouts(&mut e, &st).is_err());
+    let mut mint = fresh_state(&op);
+    mint.events.push(Event::Mint(AcceptedMint {
+        txid: Txid::all_zeros(),
+        height: 11,
+        bytes: vec![1, 2, 3],
+        value: 1,
+        pos: 0,
+    }));
+    assert!(alice.scan(&mint).is_err());
+}

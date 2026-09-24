@@ -34,6 +34,8 @@ pub enum Error {
     Chain(#[from] chain::Error),
     #[error("block {0} changed while it was being fetched")]
     BlockChanged(u32),
+    #[error("stored event {0} does not hold the envelope it claims")]
+    CorruptEvent(Txid),
 }
 
 /// Deployment profile: fixed once, shared by every wallet and indexer.
@@ -71,19 +73,19 @@ pub enum Event {
 }
 
 impl AcceptedTransfer {
-    pub fn envelope(&self) -> TransferEnvelope {
-        match Envelope::parse(&self.bytes).expect("stored envelope parses") {
-            Some(Envelope::Transfer(t)) => *t,
-            _ => unreachable!("stored transfer event holds a transfer"),
+    pub fn envelope(&self) -> Result<TransferEnvelope, Error> {
+        match Envelope::parse(&self.bytes) {
+            Ok(Some(Envelope::Transfer(t))) => Ok(*t),
+            _ => Err(Error::CorruptEvent(self.txid)),
         }
     }
 }
 
 impl AcceptedMint {
-    pub fn envelope(&self) -> MintEnvelope {
-        match Envelope::parse(&self.bytes).expect("stored envelope parses") {
-            Some(Envelope::Mint(m)) => m,
-            _ => unreachable!("stored mint event holds a mint"),
+    pub fn envelope(&self) -> Result<MintEnvelope, Error> {
+        match Envelope::parse(&self.bytes) {
+            Ok(Some(Envelope::Mint(m))) => Ok(m),
+            _ => Err(Error::CorruptEvent(self.txid)),
         }
     }
 }
