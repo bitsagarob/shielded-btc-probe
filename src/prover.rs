@@ -35,7 +35,7 @@ impl Params {
     }
 
     /// Loads `dir/transfer.pk` and `dir/transfer.vk`, generating them on
-    /// first use. Reports how long generation took on stderr.
+    /// first use. Logs how long generation took.
     pub fn load_or_setup(dir: &Path) -> Result<Self> {
         let pk_path = dir.join("transfer.pk");
         let vk_path = dir.join("transfer.vk");
@@ -50,7 +50,7 @@ impl Params {
         std::fs::create_dir_all(dir)?;
         let t = Instant::now();
         let p = Self::setup_insecure()?;
-        eprintln!("groth16 setup took {:.1}s", t.elapsed().as_secs_f64());
+        log::info!("groth16 setup took {:.1}s", t.elapsed().as_secs_f64());
         p.pk.serialize_uncompressed(std::fs::File::create(&pk_path)?)?;
         p.vk.serialize_uncompressed(std::fs::File::create(&vk_path)?)?;
         Ok(p)
@@ -89,17 +89,11 @@ mod tests {
 
     #[test]
     fn prove_and_verify_roundtrip() {
-        let t = Instant::now();
         let params = Params::setup_insecure().unwrap();
-        eprintln!("setup {:.1}s, vk {}", t.elapsed().as_secs_f64(), params.vk_fingerprint());
         let (w, p) = sample_witness();
-        let t = Instant::now();
         let proof = params.prove(&p, &w).unwrap();
-        eprintln!("prove {:.2}s, proof {} bytes", t.elapsed().as_secs_f64(), proof.len());
         assert_eq!(proof.len(), 192);
-        let t = Instant::now();
         assert!(params.verify(&p, &proof));
-        eprintln!("verify {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
         let mut bad = p.clone();
         bad.digest += crate::Fr::from(1u64);
         assert!(!params.verify(&bad, &proof));

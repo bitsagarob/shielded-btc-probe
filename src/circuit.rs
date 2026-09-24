@@ -394,7 +394,6 @@ mod tests {
         TransferCircuit { public: Some(p.clone()), witness: Some(w.clone()) }
             .generate_constraints(cs.clone())
             .unwrap();
-        eprintln!("constraints: {}", cs.num_constraints());
         assert!(cs.is_satisfied().unwrap(), "unsatisfied at {:?}", cs.which_is_unsatisfied());
     }
 
