@@ -2,7 +2,7 @@
 //! inputs and two outputs. Public inputs: r_anchor and the statement digest.
 
 use crate::keys::{self, DiversifyResult, SCALAR_BITS};
-use crate::poseidon::{self as pos_native, tag};
+use crate::poseidon::{self, tag};
 use crate::tree::MerklePath;
 use crate::{EdwardsAffine, EdwardsProjective, Fr, DIV_HASH_TRIES, N_IN, N_OUT, TREE_DEPTH};
 use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
@@ -75,7 +75,7 @@ fn missing<T: Clone>(o: &Option<T>) -> Result<T, SynthesisError> {
 }
 
 fn hash_var(cs: &ConstraintSystemRef<Fr>, t: u64, inputs: &[FpVar<Fr>]) -> Result<FpVar<Fr>, SynthesisError> {
-    let mut sponge = PoseidonSpongeVar::<Fr>::new(cs.clone(), pos_native::config());
+    let mut sponge = PoseidonSpongeVar::<Fr>::new(cs.clone(), poseidon::config());
     sponge.absorb(&FpVar::constant(Fr::from(t)))?;
     for x in inputs {
         sponge.absorb(x)?;
@@ -250,8 +250,8 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
         let mut value_out = FpVar::zero();
         let mut out_pk = Vec::with_capacity(N_OUT * 2);
         let mut out_ct = Vec::with_capacity(N_OUT * 3);
-        for jx in 0..N_OUT {
-            let out = w.as_ref().map(|w| w.outputs[jx].clone());
+        for j in 0..N_OUT {
+            let out = w.as_ref().map(|w| w.outputs[j].clone());
             let v = FpVar::new_witness(cs.clone(), || missing(&out).map(|x| Fr::from(x.v)))?;
             let d = FpVar::new_witness(cs.clone(), || missing(&out).map(|x| keys::diversifier_to_field(&x.d)))?;
             let r_seed = FpVar::new_witness(cs.clone(), || missing(&out).map(|x| x.r_seed))?;
@@ -381,7 +381,7 @@ pub mod sample {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
     use ark_ff::Field;
     use super::sample::sample_witness;

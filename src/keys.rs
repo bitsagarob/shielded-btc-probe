@@ -146,7 +146,7 @@ pub struct WalletKeys {
 
 /// Derived material. Everything here is recomputable from the seed.
 #[derive(Clone, Debug)]
-pub struct Derived {
+pub struct SpendingKeys {
     pub sk_master: [u8; 32],
     /// Spend authorisation secret, an Fr element used only through Poseidon.
     pub sk_spend: Fr,
@@ -161,14 +161,14 @@ impl WalletKeys {
         Self { seed }
     }
 
-    pub fn derive(&self) -> Derived {
+    pub fn derive(&self) -> SpendingKeys {
         let sk_master = hkdf(&self.seed, b"sbp/master");
         let sk_spend = Fr::from_le_bytes_mod_order(&hkdf(&sk_master, b"sbp/spend"));
         let vk_out = hkdf(&sk_master, b"sbp/out");
         let sk_nf = derive_sk_nf(&sk_spend);
         let vk_in = derive_vk_in(&sk_spend);
         let sk_view = derive_sk_view(&vk_in);
-        Derived { sk_master, sk_spend, sk_nf, vk_in, sk_view, vk_out }
+        SpendingKeys { sk_master, sk_spend, sk_nf, vk_in, sk_view, vk_out }
     }
 
     /// Diversified payment address (d, pk_d) for a receive path index.
@@ -191,7 +191,7 @@ pub fn derive_sk_view(vk_in: &Fr) -> Fs {
     scalar_from_field(&poseidon::hash(tag::SK_VIEW, &[*vk_in]))
 }
 
-pub fn address_for(der: &Derived, d: [u8; DIVERSIFIER_LEN]) -> Option<Address> {
+pub fn address_for(der: &SpendingKeys, d: [u8; DIVERSIFIER_LEN]) -> Option<Address> {
     let g_d = diversify_hash(&d)?.base;
     let pk_d = (g_d.into_group() * der.sk_view).into_affine();
     Some(Address { d, pk_d })

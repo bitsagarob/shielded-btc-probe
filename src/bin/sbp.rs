@@ -258,7 +258,7 @@ fn print_status(st: &State) {
         "activation {}  replayed to {}  leaves {}  nullifiers {}  events {}  rejections {}",
         st.deployment.activation,
         st.replayed_height,
-        st.tree.len,
+        st.tree.len(),
         st.nullifiers.len(),
         st.events.len(),
         st.rejections.len()
