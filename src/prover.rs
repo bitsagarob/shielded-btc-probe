@@ -6,11 +6,11 @@
 //! anywhere else. See PROFILE.md.
 
 use crate::circuit::{PublicInputs, TransferCircuit, TransferWitness};
-use ark_bls12_381::Bls12_381;
+use ark_bls12_381::{Bls12_381, Fr};
 use ark_groth16::{
     Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey, prepare_verifying_key,
 };
-use ark_relations::r1cs::SynthesisError;
+use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem, SynthesisError, SynthesisMode};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, SerializationError};
 use ark_snark::SNARK;
 use rand::SeedableRng;
@@ -32,6 +32,8 @@ pub enum Error {
     Serialization(#[from] SerializationError),
     #[error("setup: {0:?}")]
     Setup(SynthesisError),
+    #[error("stored keys are for a circuit with {found} variables, this build has {expected}")]
+    StaleKeys { expected: usize, found: usize },
     #[error("prove: {0:?}")]
     Prove(SynthesisError),
 }
@@ -40,6 +42,20 @@ pub struct Params {
     pub pk: ProvingKey<Bls12_381>,
     pub vk: VerifyingKey<Bls12_381>,
     pub pvk: PreparedVerifyingKey<Bls12_381>,
+}
+
+/// Number of R1CS variables in the transfer circuit, which is also the length
+/// of a matching proving key's `a_query`.
+pub fn circuit_variables() -> Result<usize, Error> {
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    cs.set_mode(SynthesisMode::Setup);
+    TransferCircuit {
+        public: None,
+        witness: None,
+    }
+    .generate_constraints(cs.clone())
+    .map_err(Error::Setup)?;
+    Ok(cs.num_instance_variables() + cs.num_witness_variables())
 }
 
 impl Params {
@@ -66,6 +82,13 @@ impl Params {
             let vk =
                 VerifyingKey::deserialize_uncompressed_unchecked(std::fs::File::open(&vk_path)?)
                     .map_err(Error::VerifyingKey)?;
+            let expected = circuit_variables()?;
+            if pk.a_query.len() != expected {
+                return Err(Error::StaleKeys {
+                    expected,
+                    found: pk.a_query.len(),
+                });
+            }
             let pvk = prepare_verifying_key(&vk);
             return Ok(Self { pk, vk, pvk });
         }
@@ -115,6 +138,25 @@ impl Params {
 mod tests {
     use super::*;
     use crate::circuit::sample::sample_witness;
+
+    #[test]
+    fn stored_keys_are_checked_against_the_circuit_shape() {
+        let dir = std::env::temp_dir().join(format!("sbp-params-{}", std::process::id()));
+        let fresh = Params::load_or_setup(&dir).unwrap();
+        assert_eq!(fresh.pk.a_query.len(), circuit_variables().unwrap());
+        let loaded = Params::load_or_setup(&dir).unwrap();
+        assert_eq!(loaded.vk_fingerprint(), fresh.vk_fingerprint());
+        let mut truncated = fresh.pk.clone();
+        truncated.a_query.pop();
+        truncated
+            .serialize_uncompressed(std::fs::File::create(dir.join("transfer.pk")).unwrap())
+            .unwrap();
+        assert!(matches!(
+            Params::load_or_setup(&dir),
+            Err(Error::StaleKeys { .. })
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn prove_and_verify_roundtrip() {

@@ -20,6 +20,21 @@ PROFILE.md lists every deviation from the paper.
 | operator pays 400,000 sat to alice's signet address | 151321 | `99314a8ad3bfe17b92b810b04a9942e238d9f43decaaa2598f2b54ad669bb8f6` |
 | malformed envelope with the right magic | 151321 | `08c1ca27c381dcacf7384cd2acb00677d59932dec2ac08636783b155390fc0d7` rejected: parse |
 
+## Second run, after the hardening pass (24 September 2026, activation 151455)
+
+| Step | Height | Transaction |
+|---|---|---|
+| Mint 500,000 sat to alice | 151456 | `abc8ba527c6b84d5bb2d6ae067ba354a84d669a3500efe43ad060687ac684f97` |
+| Mint 300,000 sat to bob | 151456 | `4c28f72f2e079d2ed25b3e899d702424f9d1e3d21b2f6eafbd30e96ef766e0c2` |
+| alice pays bob 120,000 shielded, 669-byte envelope, 1.97 s proof | 151459 | `1ffa8dd59d1ccdaf43ca15e6f8bf04e151e1e77c30e9be0efc654f355f0a4c73` |
+| bob redeems 400,000 spending two notes, 699-byte envelope | 151460 | `08d4707d2db63f410a17b03dbb00538e8ca7581728771a20c14f0897c3cc9a0f` |
+| operator pays 399,632 sat (400,000 minus the 368 sat fee) from the vault key | 151461 | `85a6d93d6f4d07fabfa901936a5fb58711e013e07067d6ad23aea1eb3679df25` |
+| same transfer envelope republished | 151461 | `776ccb9b4bce353a60d70feda6ece200aa8e54f95baaf8b54fe9cb5603dee272` rejected: nullifier already spent |
+
+Both wallets had notes from the first deployment; on the first scan against the
+new history they detected the changed event log and rescanned from activation.
+The operator's scan records the burned 400,000 sat output as spent.
+
 The indexer reads the chain through Fulcrum's Electrum protocol
 (`transaction.id_from_pos` enumerates each block), so it needs no node RPC.
 
