@@ -8,7 +8,7 @@ use crate::note;
 use crate::prover::Params;
 use crate::tree::MerkleTree;
 use crate::{Fr, K_MIN, N_OUT, WINDOW_W};
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use bitcoin::{BlockHash, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -194,13 +194,20 @@ impl State {
         Ok(n)
     }
 
+    /// Fetches the whole block before touching state, and bails if the
+    /// block hash moved meanwhile: nothing is mutated and the next sync
+    /// rebuilds from its stored tip.
     fn replay_block(&mut self, e: &mut Electrum, params: &Params, h: u32) -> Result<()> {
         let hash = e.block_hash(h)?;
-        let vault = self.deployment.vault_spk()?;
+        let mut txs = Vec::new();
         for txid in e.block_txids(h)? {
-            let tx = e.transaction(&txid)?;
-            if let Err(reason) = self.replay_tx(params, h, txid, &tx, &vault) {
-                self.rejections.push(Rejection { txid, height: h, reason: reason.to_string() });
+            txs.push((txid, e.transaction(&txid)?));
+        }
+        ensure!(e.block_hash(h)? == hash, "block {h} changed while it was being fetched");
+        let vault = self.deployment.vault_spk()?;
+        for (txid, tx) in &txs {
+            if let Err(reason) = self.replay_tx(params, h, *txid, tx, &vault) {
+                self.rejections.push(Rejection { txid: *txid, height: h, reason: reason.to_string() });
             }
         }
         self.roots.insert(h, self.tree.root());
