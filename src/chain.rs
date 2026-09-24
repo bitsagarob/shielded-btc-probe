@@ -381,6 +381,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "reads the live Fulcrum at 127.0.0.1:50001"]
     fn fulcrum_reachable_and_enumerates_blocks() {
         let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
         let tip = e.tip_height().unwrap();

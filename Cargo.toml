@@ -2,6 +2,7 @@
 name = "shielded-probe"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -15,7 +16,6 @@ ark-r1cs-std = "0.5"
 ark-relations = "0.5"
 ark-serialize = "0.5"
 ark-snark = "0.5"
-ark-std = "0.5"
 bitcoin = { version = "0.32", features = ["serde"] }
 chacha20poly1305 = "0.11.0"
 clap = { version = "4.6.7", features = ["derive"] }

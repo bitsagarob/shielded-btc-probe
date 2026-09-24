@@ -275,6 +275,7 @@ fn tree_and_state_roundtrip_hold() {
 /// Live: replays the signet tip through the atomic block path and trims
 /// the rejection log to the last MAX_REJECTIONS entries.
 #[test]
+#[ignore = "reads the live Fulcrum at 127.0.0.1:50001"]
 fn sync_replays_a_block_and_caps_rejections() {
     let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
     let tip = e.tip_height().unwrap();
