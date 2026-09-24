@@ -11,8 +11,11 @@ use crate::{Fr, K_MIN, N_OUT, WINDOW_W};
 use anyhow::{ensure, Context, Result};
 use bitcoin::{BlockHash, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+/// Rejections kept in the state file: the most recent ones.
+pub const MAX_REJECTIONS: usize = 1000;
 
 /// Deployment profile: fixed once, shared by every wallet and indexer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -114,7 +117,7 @@ pub struct State {
     pub deployment: Deployment,
     pub replayed_height: u32,
     pub tree: MerkleTree,
-    pub nullifiers: HashSet<Fr>,
+    pub nullifiers: BTreeSet<Fr>,
     pub roots: BTreeMap<u32, Fr>,
     pub block_hashes: BTreeMap<u32, BlockHash>,
     pub events: Vec<Event>,
@@ -131,7 +134,7 @@ impl State {
             replayed_height: deployment.activation - 1,
             deployment,
             tree,
-            nullifiers: HashSet::new(),
+            nullifiers: BTreeSet::new(),
             roots,
             block_hashes: BTreeMap::new(),
             events: Vec::new(),
@@ -217,6 +220,8 @@ impl State {
         let keep_from = h.saturating_sub(WINDOW_W + 10);
         self.roots.retain(|k, _| *k >= keep_from || *k == self.deployment.activation - 1);
         self.block_hashes.retain(|k, _| *k >= keep_from);
+        let excess = self.rejections.len().saturating_sub(MAX_REJECTIONS);
+        self.rejections.drain(..excess);
         Ok(())
     }
 
