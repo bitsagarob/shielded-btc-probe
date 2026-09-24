@@ -108,8 +108,8 @@ pub fn edwards_d() -> Fr {
 
 /// DiversifyHash(d): try y = Poseidon(DIVERSIFY, d) + k for k = 0, 1, ...
 /// until (y^2 - 1)(d y^2 + 1) is a square; take the even x; clear the
-/// cofactor by three doublings.
-pub fn diversify_hash(d: &[u8; DIVERSIFIER_LEN]) -> DiversifyResult {
+/// cofactor by three doublings. None when no candidate lands on the curve.
+pub fn diversify_hash(d: &[u8; DIVERSIFIER_LEN]) -> Option<DiversifyResult> {
     let h = poseidon::hash(tag::DIVERSIFY, &[diversifier_to_field(d)]);
     let dd = edwards_d();
     let mut roots = Vec::new();
@@ -127,12 +127,12 @@ pub fn diversify_hash(d: &[u8; DIVERSIFIER_LEN]) -> DiversifyResult {
             let raw = EdwardsAffine::new_unchecked(x, y);
             debug_assert!(raw.is_on_curve());
             let cleared = (raw.into_group() * Fs::from(8u64)).into_affine();
-            return DiversifyResult { base: cleared, k, roots };
+            return Some(DiversifyResult { base: cleared, k, roots });
         }
         let w = (nonresidue() * prod).sqrt().expect("prod is a non-square so nr*prod is a square");
         roots.push(w);
     }
-    panic!("DiversifyHash found no curve point in {DIV_HASH_TRIES} tries");
+    None
 }
 
 pub fn is_even(x: &Fr) -> bool {
@@ -177,7 +177,7 @@ impl WalletKeys {
         let mut d = [0u8; DIVERSIFIER_LEN];
         let raw = hkdf(&dk, &index.to_le_bytes());
         d.copy_from_slice(&raw[..DIVERSIFIER_LEN]);
-        address_for(&self.derive(), d)
+        address_for(&self.derive(), d).expect("an own diversifier is off-curve with probability 2^-32")
     }
 }
 
@@ -191,10 +191,10 @@ pub fn derive_sk_view(vk_in: &Fr) -> Fs {
     scalar_from_field(&poseidon::hash(tag::SK_VIEW, &[*vk_in]))
 }
 
-pub fn address_for(der: &Derived, d: [u8; DIVERSIFIER_LEN]) -> Address {
-    let g_d = diversify_hash(&d).base;
+pub fn address_for(der: &Derived, d: [u8; DIVERSIFIER_LEN]) -> Option<Address> {
+    let g_d = diversify_hash(&d)?.base;
     let pk_d = (g_d.into_group() * der.sk_view).into_affine();
-    Address { d, pk_d }
+    Some(Address { d, pk_d })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,6 +218,7 @@ impl Address {
         }
         let mut d = [0u8; DIVERSIFIER_LEN];
         d.copy_from_slice(&v[..DIVERSIFIER_LEN]);
+        diversify_hash(&d)?;
         let pk_d = point_from_bytes(&v[DIVERSIFIER_LEN..])?;
         Some(Self { d, pk_d })
     }
@@ -252,10 +253,22 @@ mod tests {
     fn diversify_hash_lands_in_prime_subgroup() {
         for i in 0..20u8 {
             let d = [i; DIVERSIFIER_LEN];
-            let r = diversify_hash(&d);
+            let r = diversify_hash(&d).unwrap();
             assert!(r.base.is_on_curve());
             assert!(r.base.is_in_correct_subgroup_assuming_on_curve());
             assert_eq!(r.roots.len(), r.k + 1);
+        }
+    }
+
+    #[test]
+    fn random_diversifiers_all_have_a_point() {
+        use rand::RngCore;
+        let mut rng = rand::thread_rng();
+        for _ in 0..300 {
+            let mut d = [0u8; DIVERSIFIER_LEN];
+            rng.fill_bytes(&mut d);
+            let r = diversify_hash(&d).unwrap();
+            assert!(r.k < DIV_HASH_TRIES);
         }
     }
 

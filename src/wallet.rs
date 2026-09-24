@@ -127,7 +127,7 @@ impl Wallet {
             match ev {
                 Event::Mint(m) => {
                     let env = m.envelope();
-                    if keys::address_for(&der, env.d).pk_d == env.pk_d {
+                    if keys::address_for(&der, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
                         self.file.notes.push(OwnedNote {
                             v: m.value,
                             d: hex::encode(env.d),
@@ -293,7 +293,7 @@ impl Wallet {
             };
             // Paper C.4: the local record must still describe the accepted leaf.
             ensure!(
-                state.tree.leaf(n.pos) == Some(circuit::input_leaf(&der.sk_spend, &inp)),
+                circuit::input_leaf(&der.sk_spend, &inp).is_some_and(|leaf| state.tree.leaf(n.pos) == Some(leaf)),
                 "local note {} does not match the replayed leaf",
                 n.pos
             );
