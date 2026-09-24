@@ -16,6 +16,7 @@ pub mod keys;
 pub mod note;
 pub mod poseidon;
 pub mod prover;
+pub mod serde_hex;
 pub mod tree;
 pub mod wallet;
 

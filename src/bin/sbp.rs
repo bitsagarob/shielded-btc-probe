@@ -192,7 +192,7 @@ fn main() -> Result<()> {
             let op = Wallet::open(operator_wallet)?;
             let dep = Deployment {
                 activation: *activation,
-                vault_script_pubkey: hex::encode(op.vault().script_pubkey().as_bytes()),
+                vault_script_pubkey: op.vault().script_pubkey(),
                 operator_address: op.address().to_string(),
                 vk_fingerprint: params.vk_fingerprint(),
             };
@@ -239,7 +239,8 @@ fn main() -> Result<()> {
             let mut w = Wallet::open(wallet)?;
             let st = load_state(&cli.state)?;
             let mut e = Electrum::connect(&cli.electrum)?;
-            let (txid, bytes, vsize) = w.mint(&mut e, &st.deployment.vault_spk()?, *amount)?;
+            let (txid, bytes, vsize) =
+                w.mint(&mut e, &st.deployment.vault_script_pubkey, *amount)?;
             println!(
                 "mint txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, paid {amount} sat to the vault"
             );

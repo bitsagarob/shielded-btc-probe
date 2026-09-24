@@ -21,14 +21,14 @@ const VAULT: &str = "00140000000000000000000000000000000000000000";
 fn dep() -> Deployment {
     Deployment {
         activation: 1000,
-        vault_script_pubkey: VAULT.into(),
+        vault_script_pubkey: ScriptBuf::from_hex(VAULT).unwrap(),
         operator_address: String::new(),
         vk_fingerprint: String::new(),
     }
 }
 
 fn vault() -> ScriptBuf {
-    dep().vault_spk().unwrap()
+    dep().vault_script_pubkey
 }
 
 fn params() -> &'static Params {

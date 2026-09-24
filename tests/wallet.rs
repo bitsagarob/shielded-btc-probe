@@ -22,7 +22,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 fn fresh_state(op: &Wallet) -> State {
     State::fresh(Deployment {
         activation: 10,
-        vault_script_pubkey: hex::encode(op.vault().script_pubkey().as_bytes()),
+        vault_script_pubkey: op.vault().script_pubkey(),
         operator_address: op.address().to_string(),
         vk_fingerprint: "test".into(),
     })
@@ -40,7 +40,7 @@ fn mint_to(st: &mut State, w: &Wallet, v: u64, seed: u64, txid_byte: u8) -> u64 
     st.events.push(Event::Mint(AcceptedMint {
         txid: Txid::from_byte_array([txid_byte; 32]),
         height: 11,
-        bytes: hex::encode(env.to_bytes()),
+        bytes: env.to_bytes(),
         value: v,
         pos,
     }));
@@ -99,7 +99,7 @@ fn transfer(
     st.events.push(Event::Transfer(AcceptedTransfer {
         txid,
         height: 12,
-        bytes: hex::encode(env.to_bytes()),
+        bytes: env.to_bytes(),
         positions,
     }));
     for n in nf {
@@ -327,13 +327,13 @@ fn older_wallet_file_gets_a_vault_key() {
     let w = Wallet::create(&p).unwrap();
     let old = format!(
         r#"{{"seed":"{}","funding_sk":"{}","notes":[],"sent":[],"scanned_events":0,"paid_payouts":["{}"]}}"#,
-        w.file.seed,
-        w.file.funding_sk,
+        hex::encode(w.file.seed),
+        hex::encode(w.file.funding_sk),
         Txid::from_byte_array([4; 32])
     );
     std::fs::write(&p, old).unwrap();
     let a = Wallet::open(&p).unwrap();
-    assert_eq!(a.file.vault_sk.len(), 64);
+    assert_ne!(a.file.vault_sk, [0u8; 32]);
     assert_eq!(
         std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
         0o600

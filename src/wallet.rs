@@ -35,16 +35,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Hex(#[from] hex::FromHexError),
-    #[error("bad seed")]
-    BadSeed,
-    #[error("bad key")]
-    BadKey,
-    #[error("bad field element")]
-    BadFieldElement,
-    #[error("bad diversifier")]
-    BadDiversifier,
     #[error("funding key: {0}")]
     FundingKey(secp256k1::Error),
     #[error("vault key: {0}")]
@@ -92,10 +82,13 @@ pub enum Error {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnedNote {
     pub v: u64,
-    pub d: String,
-    pub r_seed: String,
+    #[serde(with = "crate::serde_hex::bytes")]
+    pub d: [u8; DIVERSIFIER_LEN],
+    #[serde(with = "crate::serde_hex::fr")]
+    pub r_seed: Fr,
     pub is_mint: bool,
-    pub h_body_create: String,
+    #[serde(with = "crate::serde_hex::fr")]
+    pub h_body_create: Fr,
     pub j: u8,
     pub pos: u64,
     pub source_txid: Txid,
@@ -117,11 +110,13 @@ pub struct SentRecord {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalletFile {
-    pub seed: String,
-    pub funding_sk: String,
+    #[serde(with = "crate::serde_hex::bytes")]
+    pub seed: [u8; 32],
+    #[serde(with = "crate::serde_hex::bytes")]
+    pub funding_sk: [u8; 32],
     /// Operator only: the key holding the vault, separate from the fee key.
-    #[serde(default)]
-    pub vault_sk: String,
+    #[serde(default, with = "crate::serde_hex::bytes")]
+    pub vault_sk: [u8; 32],
     pub notes: Vec<OwnedNote>,
     pub sent: Vec<SentRecord>,
     pub scanned_events: usize,
@@ -143,26 +138,10 @@ pub struct Wallet {
     vault: FundingKey,
 }
 
-fn fr_hex(x: &Fr) -> String {
-    hex::encode(keys::fr_to_bytes(x))
-}
-fn fr_from_hex(s: &str) -> Result<Fr, Error> {
-    keys::fr_from_bytes(&hex::decode(s)?).ok_or(Error::BadFieldElement)
-}
-fn d_from_hex(s: &str) -> Result<[u8; DIVERSIFIER_LEN], Error> {
-    let v = hex::decode(s)?;
-    v.as_slice().try_into().map_err(|_| Error::BadDiversifier)
-}
-fn key_from_hex(s: &str) -> Result<[u8; 32], Error> {
-    hex::decode(s)?
-        .as_slice()
-        .try_into()
-        .map_err(|_| Error::BadKey)
-}
-fn random_hex() -> String {
+fn random_key() -> [u8; 32] {
     let mut b = [0u8; 32];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
-    hex::encode(b)
+    b
 }
 fn event_txid(ev: &Event) -> Txid {
     match ev {
@@ -170,24 +149,20 @@ fn event_txid(ev: &Event) -> Txid {
         Event::Transfer(t) => t.txid,
     }
 }
-fn input_witness(n: &OwnedNote, path: MerklePath) -> Result<InputWitness, Error> {
-    Ok(InputWitness {
+fn input_witness(n: &OwnedNote, path: MerklePath) -> InputWitness {
+    InputWitness {
         enabled: true,
         is_mint: n.is_mint,
         v: n.v,
-        d: d_from_hex(&n.d)?,
-        r_seed: fr_from_hex(&n.r_seed)?,
-        h_body_create: fr_from_hex(&n.h_body_create)?,
+        d: n.d,
+        r_seed: n.r_seed,
+        h_body_create: n.h_body_create,
         j: n.j,
         path,
-    })
+    }
 }
-fn own_nullifier(der: &SpendingKeys, n: &OwnedNote) -> Result<Fr, Error> {
-    Ok(note::nullifier(
-        &der.sk_nf,
-        &note::rho(&fr_from_hex(&n.r_seed)?),
-        n.pos,
-    ))
+fn own_nullifier(der: &SpendingKeys, n: &OwnedNote) -> Fr {
+    note::nullifier(&der.sk_nf, &note::rho(&n.r_seed), n.pos)
 }
 
 impl Wallet {
@@ -196,9 +171,9 @@ impl Wallet {
             return Err(Error::Exists(path.to_path_buf()));
         }
         let file = WalletFile {
-            seed: random_hex(),
-            funding_sk: random_hex(),
-            vault_sk: random_hex(),
+            seed: random_key(),
+            funding_sk: random_key(),
+            vault_sk: random_key(),
             notes: vec![],
             sent: vec![],
             scanned_events: 0,
@@ -217,9 +192,9 @@ impl Wallet {
             source,
         })?;
         let mut file: WalletFile = serde_json::from_reader(file)?;
-        let fill = file.vault_sk.is_empty();
+        let fill = file.vault_sk == [0u8; 32];
         if fill {
-            file.vault_sk = random_hex();
+            file.vault_sk = random_key();
         }
         let w = Self::from_file(path.to_path_buf(), file)?;
         if fill {
@@ -229,17 +204,11 @@ impl Wallet {
     }
 
     fn from_file(path: PathBuf, file: WalletFile) -> Result<Self, Error> {
-        let seed: [u8; 32] = hex::decode(&file.seed)?
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::BadSeed)?;
-        let funding =
-            FundingKey::from_bytes(&key_from_hex(&file.funding_sk)?).map_err(Error::FundingKey)?;
-        let vault =
-            FundingKey::from_bytes(&key_from_hex(&file.vault_sk)?).map_err(Error::VaultKey)?;
+        let funding = FundingKey::from_bytes(&file.funding_sk).map_err(Error::FundingKey)?;
+        let vault = FundingKey::from_bytes(&file.vault_sk).map_err(Error::VaultKey)?;
         Ok(Self {
             path,
-            keys: WalletKeys::from_seed(seed),
+            keys: WalletKeys::from_seed(file.seed),
             funding,
             vault,
             file,
@@ -304,7 +273,7 @@ impl Wallet {
                         pos: n.pos,
                         siblings: vec![],
                     },
-                )?,
+                ),
             );
             if leaf.is_some() && state.tree.leaf(n.pos) == leaf {
                 kept.push(n);
@@ -322,7 +291,7 @@ impl Wallet {
             .notes
             .iter()
             .map(|n| own_nullifier(&der, n))
-            .collect::<Result<_, Error>>()?;
+            .collect();
         let mut found = 0;
         for ev in &state.events[self.file.scanned_events..] {
             match ev {
@@ -331,10 +300,10 @@ impl Wallet {
                     if keys::address_for(&der, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
                         let n = OwnedNote {
                             v: m.value,
-                            d: hex::encode(env.d),
-                            r_seed: fr_hex(&env.r_seed),
+                            d: env.d,
+                            r_seed: env.r_seed,
                             is_mint: true,
-                            h_body_create: fr_hex(&Fr::from(0u64)),
+                            h_body_create: Fr::from(0u64),
                             j: 0,
                             pos: m.pos,
                             source_txid: m.txid,
@@ -342,7 +311,7 @@ impl Wallet {
                             locked_by: None,
                             lock_anchor: None,
                         };
-                        found += self.record(&der, &mut nfs, n)? as usize;
+                        found += self.record(&der, &mut nfs, n) as usize;
                     }
                 }
                 Event::Transfer(t) => {
@@ -364,10 +333,10 @@ impl Wallet {
                         let burned = j == 0 && env.payout.is_some();
                         let n = OwnedNote {
                             v: n.v,
-                            d: hex::encode(n.d),
-                            r_seed: fr_hex(&n.r_seed),
+                            d: n.d,
+                            r_seed: n.r_seed,
                             is_mint: false,
-                            h_body_create: fr_hex(&h_body),
+                            h_body_create: h_body,
                             j: j as u8,
                             pos: t.positions[j],
                             source_txid: t.txid,
@@ -375,7 +344,7 @@ impl Wallet {
                             locked_by: None,
                             lock_anchor: None,
                         };
-                        found += self.record(&der, &mut nfs, n)? as usize;
+                        found += self.record(&der, &mut nfs, n) as usize;
                     }
                     // Sender-side recovery, only for transfers that spend a note of ours.
                     if !env.nf.iter().any(|nf| nfs.contains(nf)) {
@@ -417,7 +386,7 @@ impl Wallet {
         // Spent status from the nullifier set; a lock whose anchor window has
         // passed without the nullifier appearing can never be replayed.
         for n in &mut self.file.notes {
-            if state.nullifiers.contains(&own_nullifier(&der, n)?) {
+            if state.nullifiers.contains(&own_nullifier(&der, n)) {
                 n.spent = true;
                 n.locked_by = None;
                 n.lock_anchor = None;
@@ -434,12 +403,7 @@ impl Wallet {
     }
 
     /// Adds a scanned note unless it is empty or already recorded.
-    fn record(
-        &mut self,
-        der: &SpendingKeys,
-        nfs: &mut HashSet<Fr>,
-        n: OwnedNote,
-    ) -> Result<bool, Error> {
+    fn record(&mut self, der: &SpendingKeys, nfs: &mut HashSet<Fr>, n: OwnedNote) -> bool {
         if n.v == 0
             || self
                 .file
@@ -447,11 +411,11 @@ impl Wallet {
                 .iter()
                 .any(|o| o.source_txid == n.source_txid && o.j == n.j)
         {
-            return Ok(false);
+            return false;
         }
-        nfs.insert(own_nullifier(der, &n)?);
+        nfs.insert(own_nullifier(der, &n));
         self.file.notes.push(n);
-        Ok(true)
+        true
     }
 
     /// Releases notes locked by a carrier that will never be replayed.
@@ -547,7 +511,7 @@ impl Wallet {
         for &i in &chosen {
             let n = &self.file.notes[i];
             let path = state.tree.path(n.pos).ok_or(Error::NotInTree(n.pos))?;
-            let inp = input_witness(n, path)?;
+            let inp = input_witness(n, path);
             // Paper C.4: the local record must still describe the accepted leaf.
             if !circuit::input_leaf(&der.sk_spend, &inp)
                 .is_some_and(|leaf| state.tree.leaf(n.pos) == Some(leaf))
@@ -753,10 +717,10 @@ pub fn validate_payout(p: &Payout, burned: u64) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn note_plaintext(n: &OwnedNote) -> Result<NotePlaintext, Error> {
-    Ok(NotePlaintext {
+pub fn note_plaintext(n: &OwnedNote) -> NotePlaintext {
+    NotePlaintext {
         v: n.v,
-        d: d_from_hex(&n.d)?,
-        r_seed: fr_from_hex(&n.r_seed)?,
-    })
+        d: n.d,
+        r_seed: n.r_seed,
+    }
 }

@@ -31,15 +31,7 @@ pub enum Error {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
-    Hex(#[from] hex::FromHexError),
-    #[error(transparent)]
     Chain(#[from] chain::Error),
-    #[error("bad leaf")]
-    BadLeaf,
-    #[error("bad nullifier")]
-    BadNullifier,
-    #[error("bad root")]
-    BadRoot,
     #[error("block {0} changed while it was being fetched")]
     BlockChanged(u32),
 }
@@ -48,24 +40,17 @@ pub enum Error {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Deployment {
     pub activation: u32,
-    pub vault_script_pubkey: String,
+    pub vault_script_pubkey: ScriptBuf,
     pub operator_address: String,
     pub vk_fingerprint: String,
-}
-
-impl Deployment {
-    pub fn vault_spk(&self) -> Result<ScriptBuf, Error> {
-        Ok(ScriptBuf::from_bytes(hex::decode(
-            &self.vault_script_pubkey,
-        )?))
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AcceptedTransfer {
     pub txid: Txid,
     pub height: u32,
-    pub bytes: String,
+    #[serde(with = "crate::serde_hex::bytes")]
+    pub bytes: Vec<u8>,
     pub positions: [u64; N_OUT],
 }
 
@@ -73,7 +58,8 @@ pub struct AcceptedTransfer {
 pub struct AcceptedMint {
     pub txid: Txid,
     pub height: u32,
-    pub bytes: String,
+    #[serde(with = "crate::serde_hex::bytes")]
+    pub bytes: Vec<u8>,
     pub value: u64,
     pub pos: u64,
 }
@@ -86,9 +72,7 @@ pub enum Event {
 
 impl AcceptedTransfer {
     pub fn envelope(&self) -> TransferEnvelope {
-        match Envelope::parse(&hex::decode(&self.bytes).expect("stored hex"))
-            .expect("stored envelope parses")
-        {
+        match Envelope::parse(&self.bytes).expect("stored envelope parses") {
             Some(Envelope::Transfer(t)) => t,
             _ => unreachable!("stored transfer event holds a transfer"),
         }
@@ -97,9 +81,7 @@ impl AcceptedTransfer {
 
 impl AcceptedMint {
     pub fn envelope(&self) -> MintEnvelope {
-        match Envelope::parse(&hex::decode(&self.bytes).expect("stored hex"))
-            .expect("stored envelope parses")
-        {
+        match Envelope::parse(&self.bytes).expect("stored envelope parses") {
             Some(Envelope::Mint(m)) => m,
             _ => unreachable!("stored mint event holds a mint"),
         }
@@ -135,12 +117,16 @@ pub enum RejectReason {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+struct HexFr(#[serde(with = "crate::serde_hex::fr")] Fr);
+
+#[derive(Serialize, Deserialize)]
 struct StateFile {
     deployment: Deployment,
     replayed_height: u32,
-    leaves: Vec<String>,
-    nullifiers: Vec<String>,
-    roots: Vec<(u32, String)>,
+    leaves: Vec<HexFr>,
+    nullifiers: Vec<HexFr>,
+    roots: Vec<(u32, HexFr)>,
     block_hashes: Vec<(u32, BlockHash)>,
     events: Vec<Event>,
     rejections: Vec<Rejection>,
@@ -182,31 +168,15 @@ impl State {
         })?;
         let f: StateFile = serde_json::from_reader(file)?;
         let mut tree = MerkleTree::new();
-        for l in &f.leaves {
-            tree.append(keys::fr_from_bytes(&hex::decode(l)?).ok_or(Error::BadLeaf)?);
+        for HexFr(l) in f.leaves {
+            tree.append(l);
         }
         Ok(Self {
             deployment: f.deployment,
             replayed_height: f.replayed_height,
             tree,
-            nullifiers: f
-                .nullifiers
-                .iter()
-                .map(|h| {
-                    keys::fr_from_bytes(&hex::decode(h).unwrap_or_default())
-                        .ok_or(Error::BadNullifier)
-                })
-                .collect::<Result<_, Error>>()?,
-            roots: f
-                .roots
-                .iter()
-                .map(|(h, r)| {
-                    Ok((
-                        *h,
-                        keys::fr_from_bytes(&hex::decode(r)?).ok_or(Error::BadRoot)?,
-                    ))
-                })
-                .collect::<Result<_, Error>>()?,
+            nullifiers: f.nullifiers.into_iter().map(|HexFr(n)| n).collect(),
+            roots: f.roots.into_iter().map(|(h, HexFr(r))| (h, r)).collect(),
             block_hashes: f.block_hashes.into_iter().collect(),
             events: f.events,
             rejections: f.rejections,
@@ -217,22 +187,9 @@ impl State {
         let f = StateFile {
             deployment: self.deployment.clone(),
             replayed_height: self.replayed_height,
-            leaves: self
-                .tree
-                .leaves()
-                .iter()
-                .map(|l| hex::encode(keys::fr_to_bytes(l)))
-                .collect(),
-            nullifiers: self
-                .nullifiers
-                .iter()
-                .map(|n| hex::encode(keys::fr_to_bytes(n)))
-                .collect(),
-            roots: self
-                .roots
-                .iter()
-                .map(|(h, r)| (*h, hex::encode(keys::fr_to_bytes(r))))
-                .collect(),
+            leaves: self.tree.leaves().into_iter().map(HexFr).collect(),
+            nullifiers: self.nullifiers.iter().copied().map(HexFr).collect(),
+            roots: self.roots.iter().map(|(h, r)| (*h, HexFr(*r))).collect(),
             block_hashes: self.block_hashes.iter().map(|(h, b)| (*h, *b)).collect(),
             events: self.events.clone(),
             rejections: self.rejections.clone(),
@@ -278,7 +235,7 @@ impl State {
         if e.block_hash(h)? != hash {
             return Err(Error::BlockChanged(h));
         }
-        let vault = self.deployment.vault_spk()?;
+        let vault = self.deployment.vault_script_pubkey.clone();
         for (txid, tx) in &txs {
             if let Err(reason) = self.replay_tx(params, h, *txid, tx, &vault) {
                 self.rejections.push(Rejection {
@@ -378,7 +335,7 @@ impl State {
         self.events.push(Event::Transfer(AcceptedTransfer {
             txid,
             height: h,
-            bytes: hex::encode(payload),
+            bytes: payload.to_vec(),
             positions,
         }));
         Ok(())
@@ -401,7 +358,7 @@ impl State {
         self.events.push(Event::Mint(AcceptedMint {
             txid,
             height: h,
-            bytes: hex::encode(payload),
+            bytes: payload.to_vec(),
             value,
             pos,
         }));
