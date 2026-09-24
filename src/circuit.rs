@@ -8,7 +8,7 @@ use crate::{EdwardsAffine, EdwardsProjective, Fr, DIV_HASH_TRIES, N_IN, N_OUT, T
 use ark_crypto_primitives::sponge::constraints::CryptographicSpongeVar;
 use ark_crypto_primitives::sponge::poseidon::constraints::PoseidonSpongeVar;
 use ark_ed_on_bls12_381::EdwardsConfig;
-use ark_ff::AdditiveGroup;
+use ark_ff::{AdditiveGroup, Field};
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::eq::EqGadget;
@@ -117,6 +117,9 @@ fn diversify_hash_var(
     for t in 0..DIV_HASH_TRIES {
         let is_k = Boolean::new_witness(cs.clone(), || missing(aux).map(|a| a.k == t))?;
         let w = FpVar::new_witness(cs.clone(), || missing(aux).map(|a| a.roots.get(t).copied().unwrap_or(Fr::ZERO)))?;
+        let inv = FpVar::new_witness(cs.clone(), || {
+            missing(aux).map(|a| if t < a.k { a.roots[t].inverse().expect("a miss root is never zero") } else { Fr::ZERO })
+        })?;
         let is_k_f = FpVar::from(is_k.clone());
         let y_t = &h + FpVar::constant(Fr::from(t as u64));
         let y2 = y_t.square()?;
@@ -124,11 +127,12 @@ fn diversify_hash_var(
         let den = &dd * &y2 + FpVar::one();
         let prod = &num * &den;
         let w2 = w.square()?;
-        // Before k: w^2 = nr * prod (no point at this y). At k: w^2 * den = num.
+        // Before k: w^2 = nr * prod with w invertible (no point at this y). At k: w^2 * den = num.
         let miss = &w2 - &nr * &prod;
         let hit = &w2 * &den - &num;
         let branch = (FpVar::one() - &is_k_f) * miss + &is_k_f * hit;
         (&not_yet * branch).enforce_equal(&FpVar::zero())?;
+        (&not_yet * (FpVar::one() - &is_k_f) * (&w * &inv - FpVar::one())).enforce_equal(&FpVar::zero())?;
         x += &is_k_f * &w;
         y += &is_k_f * &y_t;
         one_hot_sum += &is_k_f;
