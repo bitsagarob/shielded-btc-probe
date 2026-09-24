@@ -509,15 +509,15 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
     assert!(op.file.failed_payouts[&key(1)].contains("below dust"));
     assert!(op.file.failed_payouts[&key(3)].contains("non-standard"));
-    assert!(
-        op.file.failed_payouts[&key(5)].contains("insufficient funds"),
-        "vault owns nothing: {}",
-        op.file.failed_payouts[&key(5)]
-    );
-    assert_eq!(op.file.failed_payouts.len(), 3);
+    // The vault owns nothing: insufficient funds is transient, so the request
+    // stays pending rather than refused.
+    assert!(!op.file.failed_payouts.contains_key(&key(5)));
+    assert_eq!(op.file.failed_payouts.len(), 2);
     assert_eq!(op.file.paid_payouts, vec![old.to_string()]);
-    let again = Wallet::open(&op.path).unwrap();
-    assert_eq!(again.file.failed_payouts.len(), 3);
+    let mut again = Wallet::open(&op.path).unwrap();
+    assert_eq!(again.file.failed_payouts.len(), 2);
+    assert!(again.process_payouts(&mut e, &st).unwrap().is_empty());
+    assert_eq!(again.file.failed_payouts.len(), 2);
 }
 
 #[test]

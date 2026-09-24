@@ -126,7 +126,7 @@ pub struct WalletFile {
     pub scanned_txid: Option<Txid>,
     /// Peg-out requests paid, keyed by hex of nf[0] (older files hold carrier txids).
     pub paid_payouts: Vec<String>,
-    /// Peg-out requests refused or failed, hex of nf[0] to the reason.
+    /// Peg-out requests refused, hex of nf[0] to the reason.
     #[serde(default)]
     pub failed_payouts: BTreeMap<String, String>,
     /// Payout transactions this wallet broadcast.
@@ -672,8 +672,14 @@ impl Wallet {
                 self.save()?;
                 continue;
             }
+            // Chain trouble leaves the request pending; only the request itself
+            // can be refused.
             let tx = match validate_payout(p, n.v).and_then(|_| self.build_payout(client, p, &nf)) {
                 Ok(tx) => tx,
+                Err(Error::Chain(err)) => {
+                    log::warn!("payout in {} deferred: {err}", t.txid);
+                    continue;
+                }
                 Err(err) => {
                     self.fail_payout(&t.txid, key, err)?;
                     continue;
@@ -690,7 +696,8 @@ impl Wallet {
                 }
                 Err(err) => {
                     self.file.paid_payouts.retain(|k| k != &key);
-                    self.fail_payout(&t.txid, key, err.into())?;
+                    self.save()?;
+                    log::warn!("payout in {} deferred: {err}", t.txid);
                 }
             }
         }
