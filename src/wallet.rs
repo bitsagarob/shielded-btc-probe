@@ -177,7 +177,8 @@ impl Wallet {
     pub fn scan(&mut self, state: &State) -> Result<usize> {
         let der = self.keys.derive();
         let cursor = self.file.scanned_events;
-        if cursor > 0 && state.events.get(cursor - 1).map(event_txid) != self.file.scanned_txid {
+        let anchored = self.file.scanned_txid.is_some_and(|t| state.events.get(cursor.wrapping_sub(1)).is_some_and(|ev| event_txid(ev) == t));
+        if cursor > 0 && !anchored {
             eprintln!("replayed history changed under the wallet, rescanning from activation");
             self.file.notes.clear();
             self.file.sent.clear();
@@ -191,6 +192,7 @@ impl Wallet {
                 kept.push(n);
             } else {
                 eprintln!("dropping note at position {}: no longer matches the replayed leaf", n.pos);
+                self.file.scanned_events = 0;
             }
         }
         self.file.notes = kept;
