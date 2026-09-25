@@ -6,15 +6,21 @@ use bitcoin::{
     absolute, hashes::Hash, script::PushBytesBuf, transaction,
 };
 use shielded_probe::{
-    Fr, WINDOW_W,
+    Fr, K_WALLET, WINDOW_W,
     chain::{DEFAULT_ELECTRUM, Electrum, FundingKey, op_return_payload},
-    envelope::{CT_OUT_LEN, PROOF_LEN, Payout, TransferEnvelope, recovery_binding},
-    indexer::{AcceptedMint, AcceptedTransfer, Deployment, Event, State},
+    envelope::{CT_OUT_LEN, Envelope, PROOF_LEN, Payout, TransferEnvelope, recovery_binding},
+    indexer::{AcceptedMint, AcceptedTransfer, Deployment, Event, RejectReason, State},
     keys::Address,
     note::{self, NotePlaintext},
+    prover::Params,
     wallet::{DEPOSIT_CAP, Wallet, check_deposit, spends_vault, validate_payout},
 };
-use std::os::unix::fs::PermissionsExt;
+use std::{os::unix::fs::PermissionsExt, sync::OnceLock};
+
+fn params() -> &'static Params {
+    static P: OnceLock<Params> = OnceLock::new();
+    P.get_or_init(|| Params::setup_insecure().unwrap())
+}
 
 fn tmp(name: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!("sbp-wallet-{name}-{}.json", std::process::id()));
@@ -727,4 +733,100 @@ fn deposit_cap_applies_on_bitcoin_only() {
             .contains("--i-know")
     );
     assert!(check_deposit(Network::Bitcoin, DEPOSIT_CAP + 1, true).is_ok());
+}
+
+/// Records the current tree as the root of block `h`, as replay_block does.
+fn close_block(st: &mut State, h: u32) {
+    st.roots.insert(h, st.tree.root());
+    st.leaf_counts.insert(h, st.tree.len());
+    st.replayed_height = h;
+}
+
+fn carrier(envelope: &[u8]) -> Transaction {
+    Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::new_op_return(
+                PushBytesBuf::try_from(envelope.to_vec()).unwrap(),
+            ),
+        }],
+    }
+}
+
+/// Section 13.1 end to end: a wallet-built transfer anchored K_WALLET deep
+/// is accepted by replay, seen by both wallets, and refused when republished.
+#[test]
+fn built_transfer_is_accepted_by_replay_and_scanned_by_both_wallets() {
+    let op = Wallet::create(&tmp("op16")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice16")).unwrap();
+    let mut bob = Wallet::create(&tmp("bob16")).unwrap();
+    let mut st = fresh_state(&op);
+    let vault = st.deployment.vault_script_pubkey.clone();
+    close_block(&mut st, 10);
+    mint_to(&mut st, &alice, 1000, 5, 1);
+    close_block(&mut st, 11);
+    alice.scan(&st).unwrap();
+    // The mint is in the newest block: not yet under an anchor K_WALLET deep.
+    let young = alice.build_transfer(&st, params(), &bob.address(), 600, None);
+    assert!(matches!(
+        young,
+        Err(shielded_probe::wallet::Error::InsufficientBalance { available: 0, .. })
+    ));
+    close_block(&mut st, 12);
+    let built = alice
+        .build_transfer(&st, params(), &bob.address(), 600, None)
+        .unwrap();
+    assert_eq!(built.envelope.h_anchor, 12 + 1 - K_WALLET);
+    assert_eq!(built.inputs, vec![0]);
+    let bytes = built.envelope.to_bytes();
+    assert_eq!(bytes.len(), 669);
+    assert_eq!(
+        Envelope::parse(&bytes).unwrap(),
+        Some(Envelope::Transfer(Box::new(built.envelope.clone())))
+    );
+    let txid = Txid::from_byte_array([3; 32]);
+    st.replay_tx(params(), 13, txid, &carrier(&bytes), &vault)
+        .unwrap();
+    assert_eq!(st.tree.len(), 3);
+    assert_eq!(st.nullifiers.len(), 2);
+    close_block(&mut st, 13);
+    assert_eq!(
+        st.replay_tx(
+            params(),
+            14,
+            Txid::from_byte_array([4; 32]),
+            &carrier(&bytes),
+            &vault
+        ),
+        Err(RejectReason::NullifierSpent(built.envelope.nf[0]))
+    );
+    assert_eq!(bob.scan(&st).unwrap(), 1);
+    assert_eq!(bob.balance(), 600);
+    assert_eq!(alice.scan(&st).unwrap(), 1);
+    assert!(alice.file.notes[0].spent);
+    assert_eq!(alice.balance(), 400);
+    assert_eq!(alice.file.sent.len(), 2);
+    assert_eq!(alice.file.sent[0].to, bob.address().to_string());
+    // Bob spends the received note two blocks later, with a payout request.
+    close_block(&mut st, 14);
+    let payout = Payout {
+        amount: 600,
+        script_pubkey: alice.funding.script_pubkey().to_bytes(),
+    };
+    let redeem = bob
+        .build_transfer(&st, params(), &op.address(), 600, Some(payout))
+        .unwrap();
+    assert_eq!(redeem.envelope.to_bytes().len(), 699);
+    st.replay_tx(
+        params(),
+        15,
+        Txid::from_byte_array([5; 32]),
+        &carrier(&redeem.envelope.to_bytes()),
+        &vault,
+    )
+    .unwrap();
+    assert_eq!(st.tree.len(), 5);
 }

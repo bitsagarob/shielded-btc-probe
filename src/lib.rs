@@ -31,5 +31,8 @@ pub const N_OUT: usize = 2;
 /// Anchor window: replay accepts H - W <= h_anchor <= H - K_MIN.
 pub const WINDOW_W: u32 = 100;
 pub const K_MIN: u32 = 1;
+/// Wallet anchor depth (A.6 asks for K_WALLET > K_MIN): a transfer built at
+/// replayed height H anchors at R[H + 1 - K_WALLET].
+pub const K_WALLET: u32 = 2;
 /// Number of y-coordinate candidates tried by DiversifyHash before giving up.
 pub const DIV_HASH_TRIES: usize = 32;

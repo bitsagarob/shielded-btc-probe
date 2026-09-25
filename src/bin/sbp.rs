@@ -386,10 +386,12 @@ fn send(cli: &Cli, to: &str, amount: u64) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
     w.scan(&st)?;
     let to: Address = to.parse()?;
-    let (txid, bytes, vsize, prove_s, fee) = w.send(&mut e, &st, &params, &to, amount, None)?;
+    let (txid, built, vsize, fee) = w.send(&mut e, &st, &params, &to, amount, None)?;
     println!(
-        "send txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, fee {fee} sat, proof {prove_s:.2}s, anchor {}",
-        st.replayed_height
+        "send txid {txid}\nenvelope {} bytes, carrier {vsize} vB, fee {fee} sat, proof {:.2}s, anchor {}",
+        built.envelope.to_bytes().len(),
+        built.prove_s,
+        built.envelope.h_anchor
     );
     Ok(())
 }
@@ -407,10 +409,12 @@ fn redeem(cli: &Cli, amount: u64, to: &str) -> Result<()> {
         amount,
         script_pubkey: addr.script_pubkey().to_bytes(),
     };
-    let (txid, bytes, vsize, prove_s, fee) =
-        w.send(&mut e, &st, &params, &op, amount, Some(payout))?;
+    let (txid, built, vsize, fee) = w.send(&mut e, &st, &params, &op, amount, Some(payout))?;
     println!(
-        "redeem txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, fee {fee} sat, proof {prove_s:.2}s"
+        "redeem txid {txid}\nenvelope {} bytes, carrier {vsize} vB, fee {fee} sat, proof {:.2}s, anchor {}",
+        built.envelope.to_bytes().len(),
+        built.prove_s,
+        built.envelope.h_anchor
     );
     Ok(())
 }

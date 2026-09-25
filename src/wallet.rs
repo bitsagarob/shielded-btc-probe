@@ -2,7 +2,7 @@
 //! building and publishing transfers, and the operator's peg-out handler.
 
 use crate::{
-    Fr, Fs, N_IN, N_OUT, TREE_DEPTH, WINDOW_W,
+    Fr, Fs, K_WALLET, N_IN, N_OUT, TREE_DEPTH, WINDOW_W,
     chain::{self, Electrum, FundingKey, Utxo, op_return_payload},
     circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness},
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, Payout, TransferEnvelope},
@@ -53,21 +53,23 @@ pub enum Error {
     #[error("amount must be positive")]
     ZeroAmount,
     #[error(
-        "insufficient shielded balance: {available} sat available, {needed} needed (two inputs max)"
+        "insufficient shielded balance: {available} sat available under the anchor, {needed} needed (two inputs max, notes younger than {K_WALLET} blocks wait)"
     )]
     InsufficientBalance { available: u64, needed: u64 },
     #[error("note position {0} not in tree")]
     NotInTree(u64),
     #[error("local note {0} does not match the replayed leaf")]
     StaleNote(u64),
-    #[error("no root for {0}")]
+    #[error("no retained root for anchor {0}")]
     NoRoot(u32),
-    #[error("indexer state is not at its own tip")]
-    StateNotAtTip,
+    #[error("replayed leaves do not rebuild the root at {0}")]
+    AnchorMismatch(u32),
     #[error("arity")]
     Arity,
     #[error("nullifier already in the replayed set")]
     NullifierReplayed,
+    #[error("the inputs share a nullifier")]
+    DuplicateNullifier,
     #[error("ct_out length")]
     CtOutLength,
     #[error("own proof failed to verify")]
@@ -154,6 +156,14 @@ pub struct WalletFile {
     /// Payout transactions this wallet broadcast.
     #[serde(default)]
     pub payout_txids: Vec<Txid>,
+}
+
+/// A proved transfer that has not been published.
+pub struct BuiltTransfer {
+    pub envelope: TransferEnvelope,
+    /// Indices into the wallet's notes that it spends.
+    pub inputs: Vec<usize>,
+    pub prove_s: f64,
 }
 
 pub struct Wallet {
@@ -515,25 +525,37 @@ impl Wallet {
         Ok((txid, payload.len(), vsize, fee))
     }
 
-    /// Builds, proves and publishes a transfer of `amount` to `to`, with an
-    /// optional peg-out request. Returns (txid, envelope bytes, vsize, prove
-    /// seconds, fee sat).
-    pub fn send(
-        &mut self,
-        client: &mut Electrum,
+    /// Section 13.1: selects inputs under the anchor R[H + 1 - K_WALLET],
+    /// builds the outputs and ct_out, binds the body and proves. Touches no
+    /// wallet state and no network.
+    pub fn build_transfer(
+        &self,
         state: &State,
         params: &Params,
         to: &Address,
         amount: u64,
         payout: Option<Payout>,
-    ) -> Result<(Txid, usize, usize, f64, u64), Error> {
+    ) -> Result<BuiltTransfer, Error> {
         if amount == 0 {
             return Err(Error::ZeroAmount);
         }
         let der = self.keys.derive();
-        // Input selection: up to two unspent, unlocked notes.
+        let h_anchor = (state.replayed_height + 1).saturating_sub(K_WALLET);
+        let r_anchor = *state.roots.get(&h_anchor).ok_or(Error::NoRoot(h_anchor))?;
+        let len = *state
+            .leaf_counts
+            .get(&h_anchor)
+            .ok_or(Error::NoRoot(h_anchor))?;
+        let anchored = state.tree.prefix(len);
+        if anchored.root() != r_anchor {
+            return Err(Error::AnchorMismatch(h_anchor));
+        }
+        // Input selection: up to two unspent, unlocked notes under the anchor.
         let mut candidates: Vec<usize> = (0..self.file.notes.len())
-            .filter(|&i| !self.file.notes[i].spent && self.file.notes[i].locked_by.is_none())
+            .filter(|&i| {
+                let n = &self.file.notes[i];
+                !n.spent && n.locked_by.is_none() && n.pos < len
+            })
             .collect();
         candidates.sort_by(|a, b| self.file.notes[*b].v.cmp(&self.file.notes[*a].v));
         let mut chosen = Vec::new();
@@ -555,7 +577,7 @@ impl Wallet {
         let mut inputs: Vec<InputWitness> = Vec::with_capacity(N_IN);
         for &i in &chosen {
             let n = &self.file.notes[i];
-            let path = state.tree.path(n.pos).ok_or(Error::NotInTree(n.pos))?;
+            let path = anchored.path(n.pos).ok_or(Error::NotInTree(n.pos))?;
             let inp = input_witness(n, path);
             // Paper C.4: the local record must still describe the accepted leaf.
             if !circuit::input_leaf(&der.sk_spend, &inp)
@@ -596,11 +618,6 @@ impl Wallet {
                 pk_d: change_addr.pk_d,
             },
         ];
-        let h_anchor = state.replayed_height;
-        let r_anchor = *state.roots.get(&h_anchor).ok_or(Error::NoRoot(h_anchor))?;
-        if r_anchor != state.tree.root() {
-            return Err(Error::StateNotAtTip);
-        }
 
         let mut w = TransferWitness {
             sk_spend: der.sk_spend,
@@ -608,15 +625,16 @@ impl Wallet {
             inputs: inputs.clone().try_into().map_err(|_| Error::Arity)?,
             outputs: outputs.clone(),
         };
-        for nf in circuit::evaluate(&w).nf {
-            if state.nullifiers.contains(&nf) {
-                return Err(Error::NullifierReplayed);
-            }
-        }
         let st = circuit::evaluate(&w);
+        if st.nf[0] == st.nf[1] {
+            return Err(Error::DuplicateNullifier);
+        }
+        if st.nf.iter().any(|nf| state.nullifiers.contains(nf)) {
+            return Err(Error::NullifierReplayed);
+        }
         let records: [(crate::EdwardsAffine, Fs); N_OUT] =
             std::array::from_fn(|j| (outputs[j].pk_d, note::sk_eph(&outputs[j].r_seed)));
-        let mut env = TransferEnvelope {
+        let mut envelope = TransferEnvelope {
             h_anchor,
             nf: st.nf,
             pk_eph: st.pk_eph,
@@ -625,23 +643,43 @@ impl Wallet {
             payout,
             proof: vec![],
         };
-        env.ct_out = note::encrypt_recovery(&records, &env.recovery_binding(), &der.vk_out);
-        if env.ct_out.len() != CT_OUT_LEN {
+        envelope.ct_out =
+            note::encrypt_recovery(&records, &envelope.recovery_binding(), &der.vk_out);
+        if envelope.ct_out.len() != CT_OUT_LEN {
             return Err(Error::CtOutLength);
         }
-        w.h_body = env.h_body();
+        w.h_body = envelope.h_body();
         let public = PublicInputs {
             r_anchor,
-            digest: env.statement_digest(),
+            digest: envelope.statement_digest(),
         };
         let t = Instant::now();
-        env.proof = params.prove(&public, &w)?;
+        envelope.proof = params.prove(&public, &w)?;
         let prove_s = t.elapsed().as_secs_f64();
-        if !params.verify(&public, &env.proof) {
+        if !params.verify(&public, &envelope.proof) {
             return Err(Error::OwnProofInvalid);
         }
+        Ok(BuiltTransfer {
+            envelope,
+            inputs: chosen,
+            prove_s,
+        })
+    }
 
-        let payload = env.to_bytes();
+    /// Builds, proves and publishes a transfer of `amount` to `to`, with an
+    /// optional peg-out request, then locks its inputs. Returns (txid, the
+    /// built transfer, vsize, fee sat).
+    pub fn send(
+        &mut self,
+        client: &mut Electrum,
+        state: &State,
+        params: &Params,
+        to: &Address,
+        amount: u64,
+        payout: Option<Payout>,
+    ) -> Result<(Txid, BuiltTransfer, usize, u64), Error> {
+        let built = self.build_transfer(state, params, to, amount, payout)?;
+        let payload = built.envelope.to_bytes();
         let utxos = self.funding_utxos(client)?;
         let (tx, fee) = self.funding.build_carrier(
             &utxos,
@@ -651,12 +689,12 @@ impl Wallet {
         )?;
         let vsize = tx.vsize();
         let txid = client.broadcast(&tx)?;
-        for &i in &chosen {
+        for &i in &built.inputs {
             self.file.notes[i].locked_by = Some(txid);
-            self.file.notes[i].lock_anchor = Some(h_anchor);
+            self.file.notes[i].lock_anchor = Some(built.envelope.h_anchor);
         }
         self.save()?;
-        Ok((txid, payload.len(), vsize, prove_s, fee))
+        Ok((txid, built, vsize, fee))
     }
 
     /// Operator only: pay every accepted peg-out request addressed to us

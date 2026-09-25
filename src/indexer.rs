@@ -141,6 +141,9 @@ struct StateFile {
     leaves: Vec<HexFr>,
     nullifiers: Vec<HexFr>,
     roots: Vec<(u32, HexFr)>,
+    /// Tree length after each retained height, so wallets can rebuild R[h].
+    #[serde(default)]
+    leaf_counts: Vec<(u32, u64)>,
     block_hashes: Vec<(u32, BlockHash)>,
     events: Vec<Event>,
     rejections: Vec<Rejection>,
@@ -152,6 +155,7 @@ pub struct State {
     pub tree: MerkleTree,
     pub nullifiers: BTreeSet<Fr>,
     pub roots: BTreeMap<u32, Fr>,
+    pub leaf_counts: BTreeMap<u32, u64>,
     pub block_hashes: BTreeMap<u32, BlockHash>,
     pub events: Vec<Event>,
     pub rejections: Vec<Rejection>,
@@ -163,12 +167,15 @@ impl State {
         let mut roots = BTreeMap::new();
         // R[activation - 1] is the empty tree: the initial state.
         roots.insert(deployment.activation.saturating_sub(1), tree.root());
+        let mut leaf_counts = BTreeMap::new();
+        leaf_counts.insert(deployment.activation.saturating_sub(1), 0);
         Self {
             replayed_height: deployment.activation.saturating_sub(1),
             deployment,
             tree,
             nullifiers: BTreeSet::new(),
             roots,
+            leaf_counts,
             block_hashes: BTreeMap::new(),
             events: Vec::new(),
             rejections: Vec::new(),
@@ -191,6 +198,7 @@ impl State {
             tree,
             nullifiers: f.nullifiers.into_iter().map(|HexFr(n)| n).collect(),
             roots: f.roots.into_iter().map(|(h, HexFr(r))| (h, r)).collect(),
+            leaf_counts: f.leaf_counts.into_iter().collect(),
             block_hashes: f.block_hashes.into_iter().collect(),
             events: f.events,
             rejections: f.rejections,
@@ -204,6 +212,7 @@ impl State {
             leaves: self.tree.leaves().into_iter().map(HexFr).collect(),
             nullifiers: self.nullifiers.iter().copied().map(HexFr).collect(),
             roots: self.roots.iter().map(|(h, r)| (*h, HexFr(*r))).collect(),
+            leaf_counts: self.leaf_counts.iter().map(|(h, n)| (*h, *n)).collect(),
             block_hashes: self.block_hashes.iter().map(|(h, b)| (*h, *b)).collect(),
             events: self.events.clone(),
             rejections: self.rejections.clone(),
@@ -265,12 +274,15 @@ impl State {
             }
         }
         self.roots.insert(h, self.tree.root());
+        self.leaf_counts.insert(h, self.tree.len());
         self.block_hashes.insert(h, hash);
         self.replayed_height = h;
         // Keep a little more root history than the window needs.
         let keep_from = h.saturating_sub(WINDOW_W + 10);
-        self.roots
-            .retain(|k, _| *k >= keep_from || *k == self.deployment.activation.saturating_sub(1));
+        let initial = self.deployment.activation.saturating_sub(1);
+        self.roots.retain(|k, _| *k >= keep_from || *k == initial);
+        self.leaf_counts
+            .retain(|k, _| *k >= keep_from || *k == initial);
         self.block_hashes.retain(|k, _| *k >= keep_from);
         let excess = self.rejections.len().saturating_sub(MAX_REJECTIONS);
         self.rejections.drain(..excess);

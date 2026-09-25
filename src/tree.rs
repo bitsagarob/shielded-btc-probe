@@ -98,6 +98,15 @@ impl MerkleTree {
     pub fn leaves(&self) -> Vec<Fr> {
         (0..self.len).map(|i| self.get(0, i)).collect()
     }
+
+    /// The tree as it was when it held its first `len` leaves.
+    pub fn prefix(&self, len: u64) -> MerkleTree {
+        let mut t = MerkleTree::new();
+        for i in 0..len.min(self.len) {
+            t.append(self.get(0, i));
+        }
+        t
+    }
 }
 
 impl MerklePath {
@@ -133,5 +142,10 @@ mod tests {
             assert_ne!(p.root(&Fr::from(1u64)), t.root());
         }
         assert!(t.path(5).is_none());
+        let p = t.prefix(3);
+        assert_eq!(p.len(), 3);
+        assert_ne!(p.root(), t.root());
+        assert_eq!(p.path(2).unwrap().root(&Fr::from(3000u64)), p.root());
+        assert_eq!(t.prefix(9).root(), t.root());
     }
 }
