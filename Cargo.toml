@@ -42,8 +42,12 @@ sha2 = "0.10"
 thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 
+[features]
+test-util = []
+
 [dev-dependencies]
 proptest = "1.11"
+shielded-probe = { path = ".", features = ["test-util"] }
 
 # Dependencies optimised in debug so `cargo test` without --release stays usable.
 [profile.dev.package."*"]

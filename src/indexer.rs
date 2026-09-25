@@ -4,7 +4,7 @@
 
 use crate::{
     Fr, K_MIN, N_OUT, WINDOW_W,
-    chain::{self, Electrum, op_return_payload},
+    chain::{self, ChainSource, op_return_payload},
     envelope::{self, Envelope, MintEnvelope, TransferEnvelope},
     keys, note,
     prover::Params,
@@ -227,7 +227,7 @@ impl State {
     /// Replays every block from replayed_height + 1 to the tip. Returns the
     /// number of blocks processed. On a reorganisation the whole state is
     /// rebuilt from activation, which is cheap on a probe.
-    pub fn sync(&mut self, client: &mut Electrum, params: &Params) -> Result<u32, Error> {
+    pub fn sync(&mut self, client: &mut impl ChainSource, params: &Params) -> Result<u32, Error> {
         let tip = client.tip_height()?;
         if let Some(h) = self.block_hashes.get(&self.replayed_height).copied() {
             if client.block_hash(self.replayed_height)? != h {
@@ -252,7 +252,7 @@ impl State {
     /// rebuilds from its stored tip.
     fn replay_block(
         &mut self,
-        client: &mut Electrum,
+        client: &mut impl ChainSource,
         params: &Params,
         h: u32,
     ) -> Result<(), Error> {

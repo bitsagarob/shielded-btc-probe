@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use shielded_probe::{
     DIV_HASH_TRIES, Fr, Fs, N_IN, N_OUT,
-    chain::{Electrum, default_electrum},
+    chain::{ChainSource, Electrum, default_electrum},
     circuit::{TransferCircuit, sample::sample_witness},
     envelope::{self, Payout},
     indexer::{Deployment, Event, State},

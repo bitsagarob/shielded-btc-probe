@@ -7,7 +7,7 @@ use bitcoin::{
 };
 use shielded_probe::{
     EdwardsAffine, Fr,
-    chain::{DEFAULT_ELECTRUM, Electrum, op_return_payload},
+    chain::{ChainSource, DEFAULT_ELECTRUM, Electrum, op_return_payload},
     envelope::{CT_OUT_LEN, Envelope, MAGIC, MintEnvelope, PROOF_LEN, Payout, TransferEnvelope},
     indexer::{Deployment, MAX_REJECTIONS, RejectReason, Rejection, State},
     keys::{self, WalletKeys},

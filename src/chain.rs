@@ -4,8 +4,8 @@
 
 use crate::envelope::MAGIC;
 use bitcoin::{
-    Address, Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction,
-    TxIn, TxOut, Txid, Witness, absolute,
+    Address, Amount, BlockHash, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence,
+    Transaction, TxIn, TxOut, Txid, Witness, absolute,
     consensus::{deserialize, serialize},
     hashes::{Hash, sha256},
     key::Secp256k1,
@@ -19,6 +19,11 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::TcpStream,
 };
+
+#[cfg(any(test, feature = "test-util"))]
+mod mock;
+#[cfg(any(test, feature = "test-util"))]
+pub use mock::MockChain;
 
 pub const DEFAULT_ELECTRUM: &str = "127.0.0.1:50001";
 pub const DEFAULT_ELECTRUM_BITCOIN: &str = "127.0.0.1:50011";
@@ -67,6 +72,21 @@ pub struct Utxo {
     pub height: u32,
 }
 
+/// What replay and the wallet need from a chain: an Electrum server or an
+/// in-memory mock.
+pub trait ChainSource {
+    fn tip_height(&mut self) -> Result<u32, Error>;
+    fn block_hash(&mut self, height: u32) -> Result<BlockHash, Error>;
+    /// All txids of a block, in block order.
+    fn block_txids(&mut self, height: u32) -> Result<Vec<Txid>, Error>;
+    fn transaction(&mut self, txid: &Txid) -> Result<Transaction, Error>;
+    fn broadcast(&mut self, tx: &Transaction) -> Result<Txid, Error>;
+    fn listunspent(&mut self, spk: &ScriptBuf) -> Result<Vec<Utxo>, Error>;
+    /// Every (txid, height) touching a script, oldest first. Height is zero
+    /// or negative for mempool entries.
+    fn history(&mut self, spk: &ScriptBuf) -> Result<Vec<(Txid, i64)>, Error>;
+}
+
 impl Electrum {
     pub fn connect(addr: &str) -> Result<Self, Error> {
         let stream = TcpStream::connect(addr)?;
@@ -110,8 +130,10 @@ impl Electrum {
         }
         Ok(v["result"].clone())
     }
+}
 
-    pub fn tip_height(&mut self) -> Result<u32, Error> {
+impl ChainSource for Electrum {
+    fn tip_height(&mut self) -> Result<u32, Error> {
         let v = self.call("blockchain.headers.subscribe", json!([]))?;
         v["height"]
             .as_u64()
@@ -119,7 +141,7 @@ impl Electrum {
             .ok_or_else(|| protocol("no height in header"))
     }
 
-    pub fn block_hash(&mut self, height: u32) -> Result<bitcoin::BlockHash, Error> {
+    fn block_hash(&mut self, height: u32) -> Result<BlockHash, Error> {
         let hex = self.call("blockchain.block.header", json!([height]))?;
         let raw = hex::decode(
             hex.as_str()
@@ -130,8 +152,8 @@ impl Electrum {
         Ok(header.block_hash())
     }
 
-    /// All txids of a block, in block order, via transaction.id_from_pos.
-    pub fn block_txids(&mut self, height: u32) -> Result<Vec<Txid>, Error> {
+    /// Via transaction.id_from_pos.
+    fn block_txids(&mut self, height: u32) -> Result<Vec<Txid>, Error> {
         let mut out = Vec::new();
         loop {
             match self.call(
@@ -155,7 +177,7 @@ impl Electrum {
         Ok(out)
     }
 
-    pub fn transaction(&mut self, txid: &Txid) -> Result<Transaction, Error> {
+    fn transaction(&mut self, txid: &Txid) -> Result<Transaction, Error> {
         let hex = self.call("blockchain.transaction.get", json!([txid.to_string()]))?;
         deserialize(
             &hex::decode(hex.as_str().ok_or_else(|| protocol("tx not a string"))?)
@@ -164,7 +186,7 @@ impl Electrum {
         .map_err(protocol)
     }
 
-    pub fn broadcast(&mut self, tx: &Transaction) -> Result<Txid, Error> {
+    fn broadcast(&mut self, tx: &Transaction) -> Result<Txid, Error> {
         let v = self.call(
             "blockchain.transaction.broadcast",
             json!([hex::encode(serialize(tx))]),
@@ -175,7 +197,7 @@ impl Electrum {
             .map_err(protocol)
     }
 
-    pub fn listunspent(&mut self, spk: &ScriptBuf) -> Result<Vec<Utxo>, Error> {
+    fn listunspent(&mut self, spk: &ScriptBuf) -> Result<Vec<Utxo>, Error> {
         let v = self.call(
             "blockchain.scripthash.listunspent",
             json!([scripthash(spk)]),
@@ -200,12 +222,8 @@ impl Electrum {
             })
             .collect()
     }
-}
 
-impl Electrum {
-    /// Every (txid, height) touching a script, oldest first. Height is zero
-    /// or negative for mempool entries.
-    pub fn history(&mut self, spk: &ScriptBuf) -> Result<Vec<(Txid, i64)>, Error> {
+    fn history(&mut self, spk: &ScriptBuf) -> Result<Vec<(Txid, i64)>, Error> {
         let v = self.call(
             "blockchain.scripthash.get_history",
             json!([scripthash(spk)]),

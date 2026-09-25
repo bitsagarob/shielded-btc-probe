@@ -1,14 +1,14 @@
-//! Wallet behaviour against hand-built replay state. Nothing here
-//! broadcasts; the payout test reads Fulcrum with a vault that owns nothing.
+//! Wallet behaviour against hand-built replay state. Nothing here touches
+//! a network; every chain is a MockChain.
 
 use bitcoin::{
     Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
-    absolute, consensus, hashes::Hash, script::PushBytesBuf, transaction,
+    absolute, hashes::Hash, script::PushBytesBuf, transaction,
 };
 use serde_json::{Value, json};
 use shielded_probe::{
     Fr, K_WALLET, WINDOW_W,
-    chain::{DEFAULT_ELECTRUM, Electrum, FundingKey, op_return_payload},
+    chain::{ChainSource, FundingKey, MockChain, op_return_payload},
     envelope::{CT_OUT_LEN, Envelope, PROOF_LEN, Payout, TransferEnvelope, recovery_binding},
     indexer::{AcceptedMint, AcceptedTransfer, Deployment, Event, RejectReason, State},
     keys::Address,
@@ -16,12 +16,7 @@ use shielded_probe::{
     prover::Params,
     wallet::{DEPOSIT_CAP, Wallet, check_deposit, spends_vault, validate_payout},
 };
-use std::{
-    io::{BufRead, BufReader, Write},
-    net::TcpListener,
-    os::unix::fs::PermissionsExt,
-    sync::{Arc, Mutex, OnceLock},
-};
+use std::{os::unix::fs::PermissionsExt, sync::OnceLock};
 use zeroize::Zeroize;
 
 fn params() -> &'static Params {
@@ -221,7 +216,7 @@ fn unlock_releases_a_lock_without_anchor() {
     st.replayed_height += 500;
     alice.scan(&st).unwrap();
     assert_eq!(alice.balance().unwrap(), 0);
-    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let mut e = MockChain::new(100);
     assert_eq!(
         alice
             .unlock(&mut e, &Txid::from_byte_array([8; 32]), false)
@@ -239,7 +234,8 @@ fn unlock_refuses_while_the_carrier_is_known_to_the_chain() {
     let mut st = fresh_state(&op);
     mint_to(&mut st, &alice, 1000, 5, 1);
     alice.scan(&st).unwrap();
-    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let mut e = MockChain::new(99);
+    e.mine(vec![carrier(b"mined")]);
     let mined = e.block_txids(100).unwrap()[0];
     alice.file.notes[0].locked_by = Some(mined);
     assert_eq!(alice.balance().unwrap(), 0);
@@ -428,7 +424,7 @@ fn a_viewing_only_file_scans_but_cannot_fund_and_exports_its_viewing_keys() {
     mint_to(&mut st, &v, 1000, 5, 1);
     assert_eq!(v.scan(&st).unwrap(), 1);
     assert_eq!(v.balance().unwrap(), 1000);
-    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let mut e = MockChain::new(100);
     assert_eq!(
         v.mint(&mut e, &st.deployment, 1)
             .err()
@@ -648,7 +644,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     op.file.paid_payouts.push(old.to_string());
     op.scan(&st).unwrap();
     assert_eq!(op.balance().unwrap(), 0);
-    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let mut e = MockChain::new(100);
     let done = op.process_payouts(&mut e, &st, None).unwrap();
     assert!(done.is_empty());
     let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
@@ -757,7 +753,7 @@ fn hostile_state_event_bytes_are_an_error_not_a_panic() {
     st.save(&p).unwrap();
     let st = State::load(&p).unwrap();
     assert!(alice.scan(&st).is_err());
-    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let mut e = MockChain::new(100);
     assert!(alice.process_payouts(&mut e, &st, None).is_err());
     let mut mint = fresh_state(&op);
     mint.events.push(Event::Mint(AcceptedMint {
@@ -799,7 +795,7 @@ fn payouts_only_pays_the_named_request_and_bitcoin_requires_it() {
         2,
     );
     op.scan(&st).unwrap();
-    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let mut e = MockChain::new(100);
     let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
     // Both requests are refused when reached; only the named one is reached.
     assert!(
@@ -940,99 +936,6 @@ fn built_transfer_is_accepted_by_replay_and_scanned_by_both_wallets() {
     assert_eq!(st.tree.len(), 5);
 }
 
-/// An Electrum server over one vault: a confirmed funding transaction plus
-/// everything broadcast to it, which it relays even when the reply is lost.
-struct FakeElectrum {
-    vault: ScriptBuf,
-    known: Vec<Transaction>,
-    broadcasts: Vec<Transaction>,
-    fail_first: bool,
-}
-
-impl FakeElectrum {
-    fn utxos(&self) -> Vec<Value> {
-        let mut out = vec![];
-        for (i, tx) in self.known.iter().enumerate() {
-            let id = tx.compute_txid();
-            for (vout, o) in tx.output.iter().enumerate() {
-                let spent = self.known.iter().any(|t| {
-                    t.input.iter().any(|i| {
-                        i.previous_output.txid == id && i.previous_output.vout == vout as u32
-                    })
-                });
-                if o.script_pubkey == self.vault && !spent {
-                    out.push(json!({"tx_hash": id.to_string(), "tx_pos": vout,
-                        "value": o.value.to_sat(), "height": if i == 0 { 100 } else { 0 }}));
-                }
-            }
-        }
-        out
-    }
-
-    fn handle(&mut self, method: &str, params: &Value) -> Result<Value, Value> {
-        match method {
-            "server.version" => Ok(json!(["fake", "1.4"])),
-            "blockchain.scripthash.get_history" => Ok(Value::Array(
-                self.known
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| {
-                        json!({"tx_hash": t.compute_txid().to_string(),
-                            "height": if i == 0 { 100 } else { 0 }})
-                    })
-                    .collect(),
-            )),
-            "blockchain.scripthash.listunspent" => Ok(Value::Array(self.utxos())),
-            "blockchain.transaction.get" => {
-                let id: Txid = params[0].as_str().unwrap().parse().unwrap();
-                let t = self
-                    .known
-                    .iter()
-                    .find(|t| t.compute_txid() == id)
-                    .expect("known tx");
-                Ok(json!(hex::encode(consensus::serialize(t))))
-            }
-            "blockchain.transaction.broadcast" => {
-                let tx: Transaction =
-                    consensus::deserialize(&hex::decode(params[0].as_str().unwrap()).unwrap())
-                        .unwrap();
-                self.broadcasts.push(tx.clone());
-                self.known.push(tx.clone());
-                if self.fail_first {
-                    self.fail_first = false;
-                    return Err(json!({"code": -1, "message": "timeout"}));
-                }
-                Ok(json!(tx.compute_txid().to_string()))
-            }
-            m => panic!("unexpected method {m}"),
-        }
-    }
-}
-
-fn serve(fake: Arc<Mutex<FakeElectrum>>) -> String {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = l.local_addr().unwrap().to_string();
-    std::thread::spawn(move || {
-        let (s, _) = l.accept().unwrap();
-        let mut w = s.try_clone().unwrap();
-        for line in BufReader::new(s).lines() {
-            let Ok(line) = line else { break };
-            let req: Value = serde_json::from_str(&line).unwrap();
-            let id = req["id"].clone();
-            let reply = match fake
-                .lock()
-                .unwrap()
-                .handle(req["method"].as_str().unwrap(), &req["params"])
-            {
-                Ok(r) => json!({"id": id, "result": r}),
-                Err(e) => json!({"id": id, "error": e}),
-            };
-            w.write_all(format!("{reply}\n").as_bytes()).unwrap();
-        }
-    });
-    addr
-}
-
 #[test]
 fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
     let mut op = Wallet::create(&tmp("op17")).unwrap();
@@ -1061,30 +964,23 @@ fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
             script_pubkey: vault.clone(),
         }],
     };
-    let fake = Arc::new(Mutex::new(FakeElectrum {
-        vault,
-        known: vec![funded],
-        broadcasts: vec![],
-        fail_first: true,
-    }));
-    let mut e = Electrum::connect(&serve(fake.clone())).unwrap();
+    let mut e = MockChain::new(99);
+    e.mine(vec![funded]);
+    e.drop_next_broadcast_reply = true;
     let key = hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(1u64)));
 
     // Run 1: the server relays the payout but the reply is lost.
     let done = op.process_payouts(&mut e, &st, Some(req)).unwrap();
     assert!(done.is_empty());
-    let first = fake.lock().unwrap().broadcasts[0].compute_txid();
+    let first = e.mempool[0].compute_txid();
     assert_eq!(op.file.paid_payouts, vec![key.clone()]);
     assert_eq!(op.file.payout_txids, vec![first]);
-    assert_eq!(
-        fake.lock().unwrap().broadcasts[0].output[0].script_pubkey,
-        spk
-    );
+    assert_eq!(e.mempool[0].output[0].script_pubkey, spk);
 
     // Run 2: the payout sits in the mempool with its change back to the vault.
     let done = op.process_payouts(&mut e, &st, Some(req)).unwrap();
     assert!(done.is_empty());
-    assert_eq!(fake.lock().unwrap().broadcasts.len(), 1);
+    assert_eq!(e.mempool.len(), 1);
     drop(op);
     let mut again = Wallet::open(&tmp_path("op17")).unwrap();
     assert_eq!(again.file.paid_payouts, vec![key]);
@@ -1094,7 +990,7 @@ fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(fake.lock().unwrap().broadcasts.len(), 1);
+    assert_eq!(e.mempool.len(), 1);
 }
 
 #[test]

@@ -3,7 +3,7 @@
 
 use crate::{
     Fr, Fs, K_WALLET, N_IN, N_OUT, TREE_DEPTH, WINDOW_W,
-    chain::{self, Electrum, FundingKey, Utxo, op_return_payload},
+    chain::{self, ChainSource, FundingKey, Utxo, op_return_payload},
     circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness},
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, Payout, TransferEnvelope},
     indexer::{self, Deployment, Event, State},
@@ -584,7 +584,7 @@ impl Wallet {
     /// while the carrier is still known to the chain unless forced.
     pub fn unlock(
         &mut self,
-        client: &mut Electrum,
+        client: &mut impl ChainSource,
         txid: &Txid,
         force: bool,
     ) -> Result<usize, Error> {
@@ -610,7 +610,7 @@ impl Wallet {
         Ok(n)
     }
 
-    pub fn funding_utxos(&self, client: &mut Electrum) -> Result<Vec<Utxo>, Error> {
+    pub fn funding_utxos(&self, client: &mut impl ChainSource) -> Result<Vec<Utxo>, Error> {
         let mut u = client.listunspent(&self.funding_key()?.script_pubkey())?;
         u.sort_by_key(|u| Reverse(u.value));
         Ok(u)
@@ -621,7 +621,7 @@ impl Wallet {
     /// bytes, vsize, fee sat).
     pub fn mint(
         &mut self,
-        client: &mut Electrum,
+        client: &mut impl ChainSource,
         dep: &Deployment,
         amount: u64,
     ) -> Result<(Txid, usize, usize, u64), Error> {
@@ -796,7 +796,7 @@ impl Wallet {
     /// built transfer, vsize, fee sat).
     pub fn send(
         &mut self,
-        client: &mut Electrum,
+        client: &mut impl ChainSource,
         state: &State,
         params: &Params,
         to: &Address,
@@ -828,7 +828,7 @@ impl Wallet {
     /// (request txid, sat paid, fee sat, payout txid) per payout made.
     pub fn process_payouts(
         &mut self,
-        client: &mut Electrum,
+        client: &mut impl ChainSource,
         state: &State,
         only: Option<Txid>,
     ) -> Result<Vec<(Txid, u64, u64, Txid)>, Error> {
@@ -928,7 +928,7 @@ impl Wallet {
 
     fn build_payout(
         &self,
-        client: &mut Electrum,
+        client: &mut impl ChainSource,
         p: &Payout,
         nf: &[u8],
         fee_rate_sat_vb: u64,
