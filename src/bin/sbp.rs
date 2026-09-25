@@ -559,6 +559,7 @@ fn export_js(cli: &Cli) -> Result<()> {
             "kind_transfer": envelope::KIND_TRANSFER, "kind_mint": envelope::KIND_MINT,
             "ciphertext_len": CIPHERTEXT_LEN, "ct_out_len": envelope::CT_OUT_LEN,
             "proof_len": envelope::PROOF_LEN,
+            "const_salt": hex::encode(note::CONST_SALT), "aux_null": fr_hex(&note::aux_null()),
         },
         "wallets": wallets.iter().map(|(name, addr, der)| json!({
             "name": name, "address": addr,

@@ -10,7 +10,7 @@ use crate::{
     keys::{self, DIVERSIFIER_LEN},
     poseidon::{self, tag},
 };
-use ark_ff::{BigInteger, PrimeField};
+use ark_ff::{AdditiveGroup, BigInteger, PrimeField};
 use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{Aead, KeyInit, Payload},
@@ -33,6 +33,19 @@ pub struct Ciphertext {
 }
 
 pub const CIPHERTEXT_LEN: usize = 96;
+
+/// const_salt of sections 9 and 13.3: prefixed to the body under H_body and
+/// absorbed first by H_leaf. Sixteen bytes, so the field form is canonical.
+pub const CONST_SALT: &[u8; 16] = b"sbp/const_salt/1";
+
+pub fn const_salt() -> Fr {
+    Fr::from_le_bytes_mod_order(CONST_SALT)
+}
+
+/// aux_null: the h_aux slot of every leaf in this version (section 22.5).
+pub fn aux_null() -> Fr {
+    Fr::ZERO
+}
 
 impl Ciphertext {
     pub fn to_bytes(&self) -> [u8; CIPHERTEXT_LEN] {
@@ -151,12 +164,13 @@ pub fn decrypt_as_sender(
     (keys::mul(&g_d, &sk_eph(&note.r_seed)) == *pk_eph).then_some(note)
 }
 
-/// Ciphertext-derived leaf (paper section 9). h_aux is fixed to null and
-/// not serialised, as in the paper's current version.
+/// H_leaf(const_salt, h_body, j, pk_eph, ct, h_aux) of section 9, with
+/// h_aux = aux_null.
 pub fn leaf(h_body: &Fr, j: u8, pk_eph: &EdwardsAffine, ct: &Ciphertext) -> Fr {
     poseidon::hash(
         tag::LEAF,
         &[
+            const_salt(),
             *h_body,
             Fr::from(j as u64),
             pk_eph.x,
@@ -164,6 +178,7 @@ pub fn leaf(h_body: &Fr, j: u8, pk_eph: &EdwardsAffine, ct: &Ciphertext) -> Fr {
             ct.c0,
             ct.c1,
             ct.tag,
+            aux_null(),
         ],
     )
 }

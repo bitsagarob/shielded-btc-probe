@@ -264,6 +264,7 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
                 &cs,
                 tag::LEAF,
                 &[
+                    FpVar::constant(note::const_salt()),
                     h_body_create,
                     j,
                     enc.pk_eph.x.clone(),
@@ -271,6 +272,7 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
                     enc.c0,
                     enc.c1,
                     enc.tag,
+                    FpVar::constant(note::aux_null()),
                 ],
             )?;
             let mint_leaf = hash_var(

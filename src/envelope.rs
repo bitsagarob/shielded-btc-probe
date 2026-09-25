@@ -4,7 +4,7 @@
 use crate::{
     EdwardsAffine, Fr, N_IN, N_OUT,
     keys::{self, DIVERSIFIER_LEN},
-    note::{CIPHERTEXT_LEN, Ciphertext},
+    note::{CIPHERTEXT_LEN, CONST_SALT, Ciphertext},
     poseidon::{self, tag},
 };
 use sha2::{Digest, Sha256};
@@ -138,8 +138,11 @@ impl TransferEnvelope {
         v
     }
 
+    /// H_body(const_salt || canonical_transfer_body), section 13.3.
     pub fn h_body(&self) -> Fr {
-        poseidon::hash_bytes(tag::BODY, &self.body_bytes())
+        let mut salted = CONST_SALT.to_vec();
+        salted.extend_from_slice(&self.body_bytes());
+        poseidon::hash_bytes(tag::BODY, &salted)
     }
 
     /// Digest binding every public field the circuit sees (paper 13.2, 14.2).
