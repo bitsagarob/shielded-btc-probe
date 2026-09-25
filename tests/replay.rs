@@ -33,6 +33,27 @@ fn vault() -> ScriptBuf {
     dep().vault_script_pubkey
 }
 
+#[test]
+fn a_profile_without_network_or_fee_rate_is_signet_at_two_sat_vb() {
+    let d: Deployment = serde_json::from_str(&format!(
+        r#"{{"activation":1,"vault_script_pubkey":"{VAULT}","operator_address":"","vk_fingerprint":""}}"#
+    ))
+    .unwrap();
+    assert_eq!(d.network, Network::Signet);
+    assert_eq!(d.fee_rate_sat_vb, 2);
+    let d: Deployment = serde_json::from_str(
+        &serde_json::to_string(&Deployment {
+            network: Network::Bitcoin,
+            fee_rate_sat_vb: 7,
+            ..dep()
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(d.network, Network::Bitcoin);
+    assert_eq!(d.fee_rate_sat_vb, 7);
+}
+
 fn params() -> &'static Params {
     static P: OnceLock<Params> = OnceLock::new();
     P.get_or_init(|| Params::setup_insecure().unwrap())

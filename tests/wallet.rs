@@ -12,7 +12,7 @@ use shielded_probe::{
     indexer::{AcceptedMint, AcceptedTransfer, Deployment, Event, State},
     keys::Address,
     note::{self, NotePlaintext},
-    wallet::{Wallet, spends_vault, validate_payout},
+    wallet::{DEPOSIT_CAP, Wallet, check_deposit, spends_vault, validate_payout},
 };
 use std::os::unix::fs::PermissionsExt;
 
@@ -653,4 +653,78 @@ fn hostile_state_event_bytes_are_an_error_not_a_panic() {
         pos: 0,
     }));
     assert!(alice.scan(&mint).is_err());
+}
+
+#[test]
+fn payouts_only_pays_the_named_request_and_bitcoin_requires_it() {
+    let mut op = Wallet::create(&tmp("op14")).unwrap();
+    let alice = Wallet::create(&tmp("alice14")).unwrap();
+    let mut st = fresh_state(&op);
+    let (o, a) = (op.address(), alice.address());
+    let below_dust = || {
+        Some(Payout {
+            amount: 100,
+            script_pubkey: alice.funding.script_pubkey().to_bytes(),
+        })
+    };
+    let first = transfer(
+        &mut st,
+        [(&o, 1000, 1), (&a, 1, 2)],
+        None,
+        [Fr::from(1u64), Fr::from(2u64)],
+        below_dust(),
+        1,
+    );
+    let second = transfer(
+        &mut st,
+        [(&o, 1000, 3), (&a, 1, 4)],
+        None,
+        [Fr::from(3u64), Fr::from(4u64)],
+        below_dust(),
+        2,
+    );
+    op.scan(&st).unwrap();
+    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
+    // Both requests are refused when reached; only the named one is reached.
+    assert!(
+        op.process_payouts(&mut e, &st, Some(second))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(op.file.failed_payouts.contains_key(&key(3)));
+    assert!(!op.file.failed_payouts.contains_key(&key(1)));
+    assert!(
+        op.process_payouts(&mut e, &st, Some(Txid::all_zeros()))
+            .unwrap_err()
+            .to_string()
+            .starts_with("no accepted payout request")
+    );
+    st.deployment.network = Network::Bitcoin;
+    assert_eq!(
+        op.process_payouts(&mut e, &st, None)
+            .unwrap_err()
+            .to_string(),
+        "on mainnet, pass --only <txid> for each request you have verified"
+    );
+    assert!(!op.file.failed_payouts.contains_key(&key(1)));
+    assert!(
+        op.process_payouts(&mut e, &st, Some(first))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(op.file.failed_payouts.contains_key(&key(1)));
+}
+
+#[test]
+fn deposit_cap_applies_on_bitcoin_only() {
+    assert!(check_deposit(Network::Signet, DEPOSIT_CAP + 1, false).is_ok());
+    assert!(check_deposit(Network::Bitcoin, DEPOSIT_CAP, false).is_ok());
+    assert!(
+        check_deposit(Network::Bitcoin, DEPOSIT_CAP + 1, false)
+            .unwrap_err()
+            .to_string()
+            .contains("--i-know")
+    );
+    assert!(check_deposit(Network::Bitcoin, DEPOSIT_CAP + 1, true).is_ok());
 }

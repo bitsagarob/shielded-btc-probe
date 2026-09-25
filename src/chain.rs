@@ -406,6 +406,16 @@ mod tests {
     }
 
     #[test]
+    fn one_key_has_a_signet_and_a_bitcoin_address() {
+        let k = FundingKey::from_bytes(&[9u8; 32]).unwrap();
+        let (s, b) = (k.address(Network::Signet), k.address(Network::Bitcoin));
+        assert!(s.to_string().starts_with("tb1q"));
+        assert!(b.to_string().starts_with("bc1q"));
+        assert_eq!(s.script_pubkey(), b.script_pubkey());
+        assert_eq!(k.script_pubkey(), b.script_pubkey());
+    }
+
+    #[test]
     fn op_return_payload_extracts_the_carrier_push() {
         let k = FundingKey::from_bytes(&[9u8; 32]).unwrap();
         let utxos = vec![Utxo {
