@@ -16,10 +16,12 @@ use ark_ff::UniformRand;
 use bitcoin::{
     Amount, Network, ScriptBuf, Transaction, TxOut, Txid, address::FromScriptError, secp256k1,
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap, HashSet},
+    fs::File,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::Instant,
@@ -92,6 +94,8 @@ pub enum Error {
     NoSuchRequest(Txid),
     #[error("{0} sat is over the {DEPOSIT_CAP} sat deposit cap, pass --i-know to mint anyway")]
     DepositCapped(u64),
+    #[error("wallet file is locked by another process")]
+    Locked,
 }
 
 /// Deposits above this on bitcoin need an explicit override.
@@ -172,6 +176,10 @@ pub struct Wallet {
     pub keys: WalletKeys,
     pub funding: FundingKey,
     vault: FundingKey,
+    /// Exclusive flock on `<path>.lock` for the wallet's lifetime; the wallet
+    /// file itself is replaced by rename on every save, so it cannot carry
+    /// the lock.
+    _lock: File,
 }
 
 fn random_key() -> [u8; 32] {
@@ -200,12 +208,30 @@ fn input_witness(n: &OwnedNote, path: MerklePath) -> InputWitness {
 fn own_nullifier(der: &SpendingKeys, n: &OwnedNote) -> Fr {
     note::nullifier(&der.sk_nf, &note::rho(&n.r_seed), n.pos)
 }
+fn lock(path: &Path) -> Result<File, Error> {
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path.with_extension("json.lock"))?;
+    f.try_lock_exclusive().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            Error::Locked
+        } else {
+            e.into()
+        }
+    })?;
+    Ok(f)
+}
 
 impl Wallet {
     pub fn create(path: &Path) -> Result<Self, Error> {
         if path.exists() {
             return Err(Error::Exists(path.to_path_buf()));
         }
+        let lock = lock(path)?;
         let file = WalletFile {
             seed: random_key(),
             funding_sk: random_key(),
@@ -218,13 +244,14 @@ impl Wallet {
             failed_payouts: BTreeMap::new(),
             payout_txids: vec![],
         };
-        let w = Self::from_file(path.to_path_buf(), file)?;
+        let w = Self::from_file(path.to_path_buf(), file, lock)?;
         w.save()?;
         Ok(w)
     }
 
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let file = std::fs::File::open(path).map_err(|source| Error::Open {
+        let lock = lock(path)?;
+        let file = File::open(path).map_err(|source| Error::Open {
             path: path.to_path_buf(),
             source,
         })?;
@@ -233,14 +260,14 @@ impl Wallet {
         if fill {
             file.vault_sk = random_key();
         }
-        let w = Self::from_file(path.to_path_buf(), file)?;
+        let w = Self::from_file(path.to_path_buf(), file, lock)?;
         if fill {
             w.save()?;
         }
         Ok(w)
     }
 
-    fn from_file(path: PathBuf, file: WalletFile) -> Result<Self, Error> {
+    fn from_file(path: PathBuf, file: WalletFile, lock: File) -> Result<Self, Error> {
         let funding = FundingKey::from_bytes(&file.funding_sk).map_err(Error::FundingKey)?;
         let vault = FundingKey::from_bytes(&file.vault_sk).map_err(Error::VaultKey)?;
         Ok(Self {
@@ -249,6 +276,7 @@ impl Wallet {
             funding,
             vault,
             file,
+            _lock: lock,
         })
     }
 

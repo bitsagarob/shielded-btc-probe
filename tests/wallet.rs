@@ -375,6 +375,7 @@ fn open_fills_a_missing_vault_key() {
         hex::encode(w.file.funding_sk),
         Txid::from_byte_array([4; 32])
     );
+    drop(w);
     std::fs::write(&p, old).unwrap();
     let a = Wallet::open(&p).unwrap();
     assert_ne!(a.file.vault_sk, [0u8; 32]);
@@ -382,13 +383,43 @@ fn open_fills_a_missing_vault_key() {
         std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
         0o600
     );
+    let vault = a.vault().script_pubkey();
+    assert_ne!(vault, a.funding.script_pubkey());
+    drop(a);
     let b = Wallet::open(&p).unwrap();
     assert_eq!(
-        a.vault().script_pubkey(),
+        vault,
         b.vault().script_pubkey(),
         "vault key persisted on first open"
     );
-    assert_ne!(a.vault().script_pubkey(), a.funding.script_pubkey());
+}
+
+#[test]
+fn a_second_open_of_the_same_wallet_is_refused_while_the_first_lives() {
+    let p = tmp("lock");
+    let w = Wallet::create(&p).unwrap();
+    assert_eq!(
+        Wallet::open(&p).err().map(|e| e.to_string()),
+        Some("wallet file is locked by another process".into())
+    );
+    assert!(
+        Wallet::create(&p)
+            .err()
+            .is_some_and(|e| matches!(e, shielded_probe::wallet::Error::Exists(_)))
+    );
+    w.save().unwrap();
+    assert!(Wallet::open(&p).is_err(), "the lock survives a save");
+    drop(w);
+    let again = Wallet::open(&p).unwrap();
+    assert_eq!(
+        std::fs::metadata(p.with_extension("json.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    drop(again);
 }
 
 #[test]
@@ -562,7 +593,9 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     assert!(!op.file.failed_payouts.contains_key(&key(5)));
     assert_eq!(op.file.failed_payouts.len(), 2);
     assert_eq!(op.file.paid_payouts, vec![old.to_string()]);
-    let mut again = Wallet::open(&op.path).unwrap();
+    let path = op.path.clone();
+    drop(op);
+    let mut again = Wallet::open(&path).unwrap();
     assert_eq!(again.file.failed_payouts.len(), 2);
     assert!(again.process_payouts(&mut e, &st, None).unwrap().is_empty());
     assert_eq!(again.file.failed_payouts.len(), 2);
