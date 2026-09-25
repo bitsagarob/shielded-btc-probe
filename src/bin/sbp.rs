@@ -4,11 +4,12 @@ use anyhow::{Context, Result, ensure};
 use ark_ec::twisted_edwards::TECurveConfig;
 use ark_ff::PrimeField;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
+use bitcoin::Network;
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use shielded_probe::{
     DIV_HASH_TRIES, Fr, Fs, N_IN, N_OUT,
-    chain::{DEFAULT_ELECTRUM, Electrum},
+    chain::{Electrum, default_electrum},
     circuit::{TransferCircuit, sample::sample_witness},
     envelope::{self, Payout},
     indexer::{Deployment, Event, State},
@@ -35,8 +36,10 @@ struct Cli {
     /// Indexer state directory (deployment.json and state.json).
     #[arg(long, global = true, default_value = "state")]
     state: PathBuf,
-    #[arg(long, default_value = DEFAULT_ELECTRUM)]
-    electrum: String,
+    /// Electrum server; defaults to 127.0.0.1:50001 for signet and
+    /// 127.0.0.1:50011 for bitcoin.
+    #[arg(long)]
+    electrum: Option<String>,
     /// Wallet file, required by every wallet subcommand. Repeatable for
     /// export-js only.
     #[arg(long, global = true)]
@@ -57,11 +60,21 @@ enum Cmd {
         /// shielded address the peg-out target.
         #[arg(long)]
         operator_wallet: PathBuf,
+        #[arg(long, default_value = "signet", value_parser = parse_network)]
+        network: Network,
     },
     /// Create a wallet file.
-    Init,
+    Init {
+        /// Network for the printed addresses; the state dir's deployment
+        /// wins when it exists.
+        #[arg(long, value_parser = parse_network)]
+        network: Option<Network>,
+    },
     /// Show the shielded address and the funding address.
-    Address,
+    Address {
+        #[arg(long, value_parser = parse_network)]
+        network: Option<Network>,
+    },
     /// Replay the chain into the indexer state.
     Sync,
     /// Peg in: pay the vault and mint a shielded note to yourself.
@@ -90,7 +103,7 @@ enum Cmd {
     Redeem {
         #[arg(long)]
         amount: u64,
-        /// Signet address to receive the transparent coins.
+        /// Address on the deployment's network to receive the transparent coins.
         #[arg(long)]
         to: String,
     },
@@ -119,9 +132,41 @@ impl Cli {
     }
 }
 
+fn parse_network(s: &str) -> Result<Network, String> {
+    match s {
+        "signet" => Ok(Network::Signet),
+        "bitcoin" => Ok(Network::Bitcoin),
+        _ => Err("expected signet or bitcoin".into()),
+    }
+}
+
+fn load_deployment(dir: &Path) -> Result<Deployment> {
+    Ok(serde_json::from_reader(std::fs::File::open(
+        dir.join("deployment.json"),
+    )?)?)
+}
+
+/// The deployment's network when the state dir has one, else the flag, else signet.
+fn network(cli: &Cli, flag: Option<Network>) -> Result<Network> {
+    if cli.state.join("deployment.json").exists() {
+        let n = load_deployment(&cli.state)?.network;
+        ensure!(
+            flag.is_none_or(|f| f == n),
+            "the deployment in {} is on {n}",
+            cli.state.display()
+        );
+        return Ok(n);
+    }
+    Ok(flag.unwrap_or(Network::Signet))
+}
+
+fn connect(cli: &Cli, network: Network) -> Result<Electrum> {
+    let addr = cli.electrum.as_deref().unwrap_or(default_electrum(network));
+    Ok(Electrum::connect(addr)?)
+}
+
 fn load_state(dir: &Path) -> Result<State> {
-    let dep: Deployment =
-        serde_json::from_reader(std::fs::File::open(dir.join("deployment.json"))?)?;
+    let dep = load_deployment(dir)?;
     let sp = dir.join("state.json");
     if sp.exists() {
         Ok(State::load(&sp)?)
@@ -131,8 +176,8 @@ fn load_state(dir: &Path) -> Result<State> {
 }
 
 fn synced_state(cli: &Cli, params: &Params) -> Result<(State, Electrum)> {
-    let mut e = Electrum::connect(&cli.electrum)?;
     let mut st = load_state(&cli.state)?;
+    let mut e = connect(cli, st.deployment.network)?;
     ensure!(
         st.deployment.vk_fingerprint == params.vk_fingerprint(),
         "verifying key does not match the deployment"
@@ -158,9 +203,10 @@ fn main() -> Result<()> {
         Cmd::Deploy {
             activation,
             operator_wallet,
-        } => deploy(&cli, *activation, operator_wallet),
-        Cmd::Init => init(&cli),
-        Cmd::Address => address(&cli),
+            network,
+        } => deploy(&cli, *activation, operator_wallet, *network),
+        Cmd::Init { network } => init(&cli, *network),
+        Cmd::Address { network } => address(&cli, *network),
         Cmd::Sync => sync(&cli),
         Cmd::Status => status(&cli),
         Cmd::Mint { amount } => mint(&cli, *amount),
@@ -211,10 +257,11 @@ fn bench() -> Result<()> {
     Ok(())
 }
 
-fn deploy(cli: &Cli, activation: u32, operator_wallet: &Path) -> Result<()> {
+fn deploy(cli: &Cli, activation: u32, operator_wallet: &Path, network: Network) -> Result<()> {
     let params = Params::load_or_setup(&cli.params)?;
     let op = Wallet::open(operator_wallet)?;
     let dep = Deployment {
+        network,
         activation,
         vault_script_pubkey: op.vault().script_pubkey(),
         operator_address: op.address().to_string(),
@@ -226,23 +273,25 @@ fn deploy(cli: &Cli, activation: u32, operator_wallet: &Path) -> Result<()> {
         &dep,
     )?;
     println!(
-        "activation {activation}\nvault {}\noperator {}\nvk {}",
-        op.vault().address(),
+        "network {network}\nactivation {activation}\nvault {}\noperator {}\nvk {}",
+        op.vault().address(network),
         dep.operator_address,
         dep.vk_fingerprint
     );
     Ok(())
 }
 
-fn init(cli: &Cli) -> Result<()> {
+fn init(cli: &Cli, flag: Option<Network>) -> Result<()> {
+    let network = network(cli, flag)?;
     let w = Wallet::create(cli.wallet()?)?;
-    print_addresses(&w);
+    print_addresses(&w, network);
     Ok(())
 }
 
-fn address(cli: &Cli) -> Result<()> {
+fn address(cli: &Cli, flag: Option<Network>) -> Result<()> {
+    let network = network(cli, flag)?;
     let w = Wallet::open(cli.wallet()?)?;
-    print_addresses(&w);
+    print_addresses(&w, network);
     Ok(())
 }
 
@@ -262,7 +311,7 @@ fn status(cli: &Cli) -> Result<()> {
 fn mint(cli: &Cli, amount: u64) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
     let st = load_state(&cli.state)?;
-    let mut e = Electrum::connect(&cli.electrum)?;
+    let mut e = connect(cli, st.deployment.network)?;
     let (txid, bytes, vsize) = w.mint(&mut e, &st.deployment.vault_script_pubkey, amount)?;
     println!(
         "mint txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, paid {amount} sat to the vault"
@@ -305,7 +354,7 @@ fn scan(cli: &Cli) -> Result<()> {
 
 fn unlock(cli: &Cli, txid: &str, force: bool) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
-    let mut e = Electrum::connect(&cli.electrum)?;
+    let mut e = connect(cli, load_deployment(&cli.state)?.network)?;
     let n = w.unlock(&mut e, &txid.parse()?, force)?;
     println!("unlocked {n} notes, balance {} sat", w.balance());
     Ok(())
@@ -333,7 +382,7 @@ fn redeem(cli: &Cli, amount: u64, to: &str) -> Result<()> {
     let op: Address = st.deployment.operator_address.parse()?;
     let addr: bitcoin::Address = to
         .parse::<bitcoin::Address<_>>()?
-        .require_network(shielded_probe::chain::NETWORK)?;
+        .require_network(st.deployment.network)?;
     let payout = Payout {
         amount,
         script_pubkey: addr.script_pubkey().to_bytes(),
@@ -345,7 +394,7 @@ fn redeem(cli: &Cli, amount: u64, to: &str) -> Result<()> {
 
 fn publish_raw(cli: &Cli, hex: &str) -> Result<()> {
     let w = Wallet::open(cli.wallet()?)?;
-    let mut e = Electrum::connect(&cli.electrum)?;
+    let mut e = connect(cli, load_deployment(&cli.state)?.network)?;
     let payload = hex::decode(hex)?;
     let utxos = w.funding_utxos(&mut e)?;
     let tx = w.funding.build_carrier(&utxos, &payload, vec![])?;
@@ -496,12 +545,12 @@ fn export_js(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn print_addresses(w: &Wallet) {
+fn print_addresses(w: &Wallet, network: Network) {
     println!(
         "shielded {}\nfunding  {}\nvault    {}",
         w.address(),
-        w.funding.address(),
-        w.vault().address()
+        w.funding.address(network),
+        w.vault().address(network)
     );
 }
 

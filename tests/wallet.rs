@@ -2,8 +2,8 @@
 //! broadcasts; the payout test reads Fulcrum with a vault that owns nothing.
 
 use bitcoin::{
-    Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, absolute,
-    hashes::Hash, script::PushBytesBuf, transaction,
+    Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+    absolute, hashes::Hash, script::PushBytesBuf, transaction,
 };
 use shielded_probe::{
     Fr, WINDOW_W,
@@ -24,6 +24,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 
 fn fresh_state(op: &Wallet) -> State {
     State::fresh(Deployment {
+        network: Network::Signet,
         activation: 10,
         vault_script_pubkey: op.vault().script_pubkey(),
         operator_address: op.address().to_string(),
@@ -401,7 +402,8 @@ fn validate_payout_cases() {
                 amount: 1000,
                 script_pubkey: p2wpkh.clone()
             },
-            1000
+            1000,
+            Network::Signet
         )
         .is_ok()
     );
@@ -411,7 +413,8 @@ fn validate_payout_cases() {
                 amount: 1001,
                 script_pubkey: p2wpkh.clone()
             },
-            1000
+            1000,
+            Network::Signet
         )
         .is_err()
     );
@@ -421,7 +424,8 @@ fn validate_payout_cases() {
                 amount: 545,
                 script_pubkey: p2wpkh.clone()
             },
-            1000
+            1000,
+            Network::Signet
         )
         .is_err()
     );
@@ -431,7 +435,8 @@ fn validate_payout_cases() {
                 amount: 1000,
                 script_pubkey: vec![]
             },
-            1000
+            1000,
+            Network::Signet
         )
         .is_err()
     );
@@ -441,7 +446,8 @@ fn validate_payout_cases() {
                 amount: 1000,
                 script_pubkey: vec![0x51]
             },
-            1000
+            1000,
+            Network::Signet
         )
         .is_err()
     );
@@ -453,7 +459,8 @@ fn validate_payout_cases() {
                 amount: 1000,
                 script_pubkey: p2wsh
             },
-            1000
+            1000,
+            Network::Signet
         )
         .is_err()
     );
@@ -465,7 +472,8 @@ fn validate_payout_cases() {
                 amount: 1000,
                 script_pubkey: p2tr
             },
-            1000
+            1000,
+            Network::Signet
         )
         .is_ok()
     );

@@ -9,7 +9,7 @@ use crate::{
     prover::Params,
     tree::MerkleTree,
 };
-use bitcoin::{BlockHash, ScriptBuf, Transaction, Txid};
+use bitcoin::{BlockHash, Network, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -41,10 +41,16 @@ pub enum Error {
 /// Deployment profile: fixed once, shared by every wallet and indexer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Deployment {
+    #[serde(default = "default_network")]
+    pub network: Network,
     pub activation: u32,
     pub vault_script_pubkey: ScriptBuf,
     pub operator_address: String,
     pub vk_fingerprint: String,
+}
+
+fn default_network() -> Network {
+    Network::Signet
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

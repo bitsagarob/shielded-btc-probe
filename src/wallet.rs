@@ -3,7 +3,7 @@
 
 use crate::{
     Fr, Fs, N_IN, N_OUT, TREE_DEPTH, WINDOW_W,
-    chain::{self, Electrum, FEE_RATE_SAT_VB, FundingKey, NETWORK, Utxo, op_return_payload},
+    chain::{self, Electrum, FEE_RATE_SAT_VB, FundingKey, Utxo, op_return_payload},
     circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness},
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, Payout, TransferEnvelope},
     indexer::{self, Event, State},
@@ -13,7 +13,9 @@ use crate::{
     tree::MerklePath,
 };
 use ark_ff::UniformRand;
-use bitcoin::{Amount, ScriptBuf, Transaction, TxOut, Txid, address::FromScriptError, secp256k1};
+use bitcoin::{
+    Amount, Network, ScriptBuf, Transaction, TxOut, Txid, address::FromScriptError, secp256k1,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Reverse,
@@ -693,7 +695,9 @@ impl Wallet {
             }
             // Chain trouble leaves the request pending; only the request itself
             // can be refused.
-            let tx = match validate_payout(p, n.v).and_then(|_| self.build_payout(client, p, &nf)) {
+            let tx = match validate_payout(p, n.v, state.deployment.network)
+                .and_then(|_| self.build_payout(client, p, &nf))
+            {
                 Ok(tx) => tx,
                 Err(Error::Chain(err)) => {
                     log::warn!("payout in {} deferred: {err}", t.txid);
@@ -757,7 +761,7 @@ impl Wallet {
 
 /// A peg-out request must not exceed the burn, must clear dust, and must
 /// pay a standard single-key or script-hash output.
-pub fn validate_payout(p: &Payout, burned: u64) -> Result<(), Error> {
+pub fn validate_payout(p: &Payout, burned: u64, network: Network) -> Result<(), Error> {
     if p.amount > burned {
         return Err(Error::PayoutExceedsBurn {
             amount: p.amount,
@@ -771,7 +775,8 @@ pub fn validate_payout(p: &Payout, burned: u64) -> Result<(), Error> {
     if !(s.is_p2wpkh() || s.is_p2tr() || s.is_p2sh() || s.is_p2pkh()) {
         return Err(Error::NonStandardPayout);
     }
-    bitcoin::Address::from_script(s, NETWORK)?;
+    bitcoin::Address::from_script(s, network)?;
+
     Ok(())
 }
 

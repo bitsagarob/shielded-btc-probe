@@ -20,8 +20,15 @@ use std::{
 };
 
 pub const DEFAULT_ELECTRUM: &str = "127.0.0.1:50001";
-pub const NETWORK: Network = Network::Signet;
+pub const DEFAULT_ELECTRUM_BITCOIN: &str = "127.0.0.1:50011";
 pub const FEE_RATE_SAT_VB: u64 = 2;
+
+pub fn default_electrum(network: Network) -> &'static str {
+    match network {
+        Network::Bitcoin => DEFAULT_ELECTRUM_BITCOIN,
+        _ => DEFAULT_ELECTRUM,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -242,11 +249,11 @@ impl FundingKey {
         let secp = Secp256k1::new();
         CompressedPublicKey(self.sk.public_key(&secp))
     }
-    pub fn address(&self) -> Address {
-        Address::p2wpkh(&self.pubkey(), NETWORK)
+    pub fn address(&self, network: Network) -> Address {
+        Address::p2wpkh(&self.pubkey(), network)
     }
     pub fn script_pubkey(&self) -> ScriptBuf {
-        self.address().script_pubkey()
+        ScriptBuf::new_p2wpkh(&self.pubkey().wpubkey_hash())
     }
 
     /// Builds and signs a transaction: `extra` outputs first, then one

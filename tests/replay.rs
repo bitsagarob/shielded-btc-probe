@@ -2,8 +2,8 @@
 //! canonical envelope bytes, carrier strictness, stable state files.
 
 use bitcoin::{
-    Amount, ScriptBuf, Transaction, TxOut, Txid, absolute, hashes::Hash, script::PushBytesBuf,
-    transaction,
+    Amount, Network, ScriptBuf, Transaction, TxOut, Txid, absolute, hashes::Hash,
+    script::PushBytesBuf, transaction,
 };
 use shielded_probe::{
     EdwardsAffine, Fr,
@@ -20,6 +20,7 @@ const VAULT: &str = "00140000000000000000000000000000000000000000";
 
 fn dep() -> Deployment {
     Deployment {
+        network: Network::Signet,
         activation: 1000,
         vault_script_pubkey: ScriptBuf::from_hex(VAULT).unwrap(),
         operator_address: String::new(),
