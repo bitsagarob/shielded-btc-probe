@@ -7,12 +7,13 @@ use bitcoin::{
 };
 use shielded_probe::{
     EdwardsAffine, Fr,
-    chain::{ChainSource, DEFAULT_ELECTRUM, Electrum, op_return_payload},
+    chain::{ChainSource, DEFAULT_ELECTRUM, Electrum, MockChain, op_return_payload},
     envelope::{CT_OUT_LEN, Envelope, MAGIC, MintEnvelope, PROOF_LEN, Payout, TransferEnvelope},
-    indexer::{Deployment, MAX_REJECTIONS, RejectReason, Rejection, State},
+    indexer::{Deployment, Event, MAX_REJECTIONS, RejectReason, Rejection, State},
     keys::{self, WalletKeys},
     note::{NotePlaintext, encrypt},
     prover::Params,
+    wallet::Wallet,
 };
 use std::sync::OnceLock;
 
@@ -318,4 +319,91 @@ fn sync_replays_a_block_and_caps_rejections() {
     assert_eq!(st.rejections.len(), MAX_REJECTIONS);
     assert_eq!(st.rejections[0].height, 5);
     assert_eq!(st.block_hashes.get(&tip), Some(&e.block_hash(tip).unwrap()));
+}
+
+fn mint_to(w: &Wallet, sats: u64, seed: u64) -> Transaction {
+    let a = w.address();
+    let m = MintEnvelope {
+        d: a.d,
+        pk_d: a.pk_d,
+        r_seed: Fr::from(seed),
+    };
+    tx(vec![pay_vault(sats), push(&m.to_bytes())])
+}
+
+/// Three blocks: a mint, a transfer spending it, an empty one. Block 2 is
+/// then replaced, so the transfer is orphaned and the state must be rebuilt
+/// from activation.
+#[test]
+fn sync_rebuilds_from_activation_when_a_replayed_block_is_replaced() {
+    let dir = scratch("reorg");
+    let mut alice = Wallet::create(&dir.join("alice.json")).unwrap();
+    let bob = Wallet::create(&dir.join("bob.json")).unwrap();
+    let mut chain = MockChain::new(999);
+    let mut st = State::fresh(dep());
+    chain.mine(vec![mint_to(&alice, 1000, 5)]);
+    assert_eq!(st.sync(&mut chain, params()).unwrap(), 1);
+    alice.scan(&st).unwrap();
+    // The indexer accepts an anchor K_MIN deep; build against the next height.
+    st.replayed_height = 1001;
+    let built = alice
+        .build_transfer(&st, params(), &bob.address(), 600, None)
+        .unwrap();
+    st.replayed_height = 1000;
+    assert_eq!(built.envelope.h_anchor, 1000);
+    chain.mine(vec![tx(vec![push(&built.envelope.to_bytes())])]);
+    chain.mine(vec![]);
+    assert_eq!(st.sync(&mut chain, params()).unwrap(), 2);
+    assert_eq!(st.replayed_height, 1002);
+    assert_eq!(st.tree.len(), 3);
+    assert_eq!(st.nullifiers.len(), 2);
+    assert_eq!(st.events.len(), 2);
+    let old_tip = chain.block_hash(1002).unwrap();
+    assert_eq!(st.block_hashes.get(&1002), Some(&old_tip));
+
+    chain.replace(1001, vec![mint_to(&alice, 700, 6)]);
+    let new_tip = chain.block_hash(1002).unwrap();
+    assert_ne!(new_tip, old_tip);
+    assert_eq!(st.sync(&mut chain, params()).unwrap(), 3);
+    assert_eq!(st.replayed_height, 1002);
+    assert_eq!(st.tree.len(), 2);
+    assert!(st.nullifiers.is_empty());
+    assert_eq!(st.events.len(), 2);
+    assert!(st.events.iter().all(|e| matches!(e, Event::Mint(_))));
+    assert_eq!(
+        st.block_hashes.get(&1000),
+        Some(&chain.block_hash(1000).unwrap())
+    );
+    assert_eq!(st.block_hashes.get(&1002), Some(&new_tip));
+    alice.scan(&st).unwrap();
+    assert_eq!(alice.balance().unwrap(), 1700);
+}
+
+#[test]
+fn sync_leaves_state_unmutated_when_a_block_changes_while_it_is_fetched() {
+    let dir = scratch("midfetch");
+    let alice = Wallet::create(&dir.join("alice.json")).unwrap();
+    let mut chain = MockChain::new(999);
+    let mint = mint_to(&alice, 1000, 5);
+    chain.mine(vec![mint.clone()]);
+    // The block gains a transaction while its txids are being fetched.
+    chain.after_txids = Some(Box::new(move |c| {
+        c.replace(1000, vec![mint, mint_to(&alice, 700, 6)])
+    }));
+    let mut st = State::fresh(dep());
+    assert!(matches!(
+        st.sync(&mut chain, params()),
+        Err(shielded_probe::indexer::Error::BlockChanged(1000))
+    ));
+    assert_eq!(st.replayed_height, 999);
+    assert_eq!(st.tree.len(), 0);
+    assert!(st.events.is_empty());
+    assert!(st.block_hashes.is_empty());
+    assert_eq!(st.roots.len(), 1);
+    assert_eq!(st.sync(&mut chain, params()).unwrap(), 1);
+    assert_eq!(st.tree.len(), 2);
+    assert_eq!(
+        st.block_hashes.get(&1000),
+        Some(&chain.block_hash(1000).unwrap())
+    );
 }
