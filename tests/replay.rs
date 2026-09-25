@@ -2,7 +2,7 @@
 //! canonical envelope bytes, carrier strictness, stable state files.
 
 use bitcoin::{
-    Amount, Network, ScriptBuf, Transaction, TxOut, Txid, absolute, hashes::Hash,
+    Amount, BlockHash, Network, ScriptBuf, Transaction, TxOut, Txid, absolute, hashes::Hash,
     script::PushBytesBuf, transaction,
 };
 use shielded_probe::{
@@ -24,6 +24,7 @@ fn dep() -> Deployment {
         network: Network::Signet,
         fee_rate_sat_vb: 2,
         activation: 1000,
+        activation_hash: None,
         vault_script_pubkey: ScriptBuf::from_hex(VAULT).unwrap(),
         operator_address: String::new(),
         vk_fingerprint: String::new(),
@@ -42,6 +43,7 @@ fn a_profile_without_network_or_fee_rate_is_signet_at_two_sat_vb() {
     .unwrap();
     assert_eq!(d.network, Network::Signet);
     assert_eq!(d.fee_rate_sat_vb, 2);
+    assert_eq!(d.activation_hash, None);
     let d: Deployment = serde_json::from_str(
         &serde_json::to_string(&Deployment {
             network: Network::Bitcoin,
@@ -406,4 +408,31 @@ fn sync_leaves_state_unmutated_when_a_block_changes_while_it_is_fetched() {
         st.block_hashes.get(&1000),
         Some(&chain.block_hash(1000).unwrap())
     );
+}
+
+#[test]
+fn sync_refuses_a_chain_without_the_activation_hash_instead_of_rebuilding() {
+    let mut chain = MockChain::new(999);
+    chain.mine(vec![]);
+    let right = chain.block_hash(999).unwrap();
+    let mut st = State::fresh(Deployment {
+        activation_hash: Some(BlockHash::all_zeros()),
+        ..dep()
+    });
+    st.tree.append(Fr::from(1u64));
+    match st.sync(&mut chain, params()) {
+        Err(shielded_probe::indexer::Error::WrongChain { expected, got }) => {
+            assert_eq!(expected, BlockHash::all_zeros());
+            assert_eq!(got, right);
+        }
+        r => panic!("{r:?}"),
+    }
+    assert_eq!(st.tree.len(), 1, "state was touched");
+    assert_eq!(st.replayed_height, 999);
+    let mut st = State::fresh(Deployment {
+        activation_hash: Some(right),
+        ..dep()
+    });
+    assert_eq!(st.sync(&mut chain, params()).unwrap(), 1);
+    assert_eq!(st.replayed_height, 1000);
 }

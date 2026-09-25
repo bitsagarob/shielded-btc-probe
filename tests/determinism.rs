@@ -47,6 +47,7 @@ fn two_indexers_replaying_the_same_bytes_agree_across_a_save_load_cycle() {
         network: Network::Signet,
         fee_rate_sat_vb: 2,
         activation: 10,
+        activation_hash: None,
         vault_script_pubkey: op.vault().script_pubkey(),
         operator_address: op.address().to_string(),
         vk_fingerprint: "t".into(),

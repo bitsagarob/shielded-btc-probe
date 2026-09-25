@@ -35,6 +35,8 @@ pub enum Error {
     Chain(#[from] chain::Error),
     #[error("block {0} changed while it was being fetched")]
     BlockChanged(u32),
+    #[error("wrong chain: the block before activation is {got}, the deployment expects {expected}")]
+    WrongChain { expected: BlockHash, got: BlockHash },
     #[error("stored event {0} does not hold the envelope it claims")]
     CorruptEvent(Txid),
 }
@@ -47,6 +49,10 @@ pub struct Deployment {
     #[serde(default = "default_fee_rate")]
     pub fee_rate_sat_vb: u64,
     pub activation: u32,
+    /// Hash of block activation - 1, fixed at deploy time so a server on
+    /// another chain is refused instead of replayed. None in older profiles.
+    #[serde(default)]
+    pub activation_hash: Option<BlockHash>,
     pub vault_script_pubkey: ScriptBuf,
     pub operator_address: String,
     pub vk_fingerprint: String,
@@ -226,8 +232,18 @@ impl State {
 
     /// Replays every block from replayed_height + 1 to the tip. Returns the
     /// number of blocks processed. On a reorganisation the whole state is
-    /// rebuilt from activation, which is cheap on a probe.
+    /// rebuilt from activation, which is cheap on a probe. A server whose
+    /// chain does not carry the deployment's activation hash is an error.
     pub fn sync(&mut self, client: &mut impl ChainSource, params: &Params) -> Result<u32, Error> {
+        if let (Some(expected), Some(h)) = (
+            self.deployment.activation_hash,
+            self.deployment.activation.checked_sub(1),
+        ) {
+            let got = client.block_hash(h)?;
+            if got != expected {
+                return Err(Error::WrongChain { expected, got });
+            }
+        }
         let tip = client.tip_height()?;
         if let Some(h) = self.block_hashes.get(&self.replayed_height).copied() {
             if client.block_hash(self.replayed_height)? != h {

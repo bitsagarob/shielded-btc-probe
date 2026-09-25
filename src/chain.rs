@@ -49,6 +49,8 @@ pub enum Error {
     InsufficientFunds { have: u64, need: u64 },
     #[error("fee did not converge")]
     FeeDidNotConverge,
+    #[error("wrong chain: genesis block is {got}, expected {expected}")]
+    WrongGenesis { expected: BlockHash, got: BlockHash },
     #[error(transparent)]
     PushBytes(#[from] PushBytesError),
     #[error(transparent)]
@@ -98,6 +100,17 @@ impl Electrum {
             next_id: 0,
         };
         e.call("server.version", json!(["shielded-probe", "1.4"]))?;
+        Ok(e)
+    }
+
+    /// Connects and refuses a server whose genesis block is not `network`'s.
+    pub fn connect_checked(addr: &str, network: Network) -> Result<Self, Error> {
+        let mut e = Self::connect(addr)?;
+        let expected = bitcoin::blockdata::constants::genesis_block(network).block_hash();
+        let got = e.block_hash(0)?;
+        if got != expected {
+            return Err(Error::WrongGenesis { expected, got });
+        }
         Ok(e)
     }
 

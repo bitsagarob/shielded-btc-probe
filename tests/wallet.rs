@@ -39,6 +39,7 @@ fn fresh_state(op: &Wallet) -> State {
         network: Network::Signet,
         fee_rate_sat_vb: 2,
         activation: 10,
+        activation_hash: None,
         vault_script_pubkey: op.vault_key().unwrap().script_pubkey(),
         operator_address: op.address().to_string(),
         vk_fingerprint: "test".into(),

@@ -185,7 +185,7 @@ fn network(cli: &Cli, flag: Option<Network>) -> Result<Network> {
 
 fn connect(cli: &Cli, network: Network) -> Result<Electrum> {
     let addr = cli.electrum.as_deref().unwrap_or(default_electrum(network));
-    Ok(Electrum::connect(addr)?)
+    Ok(Electrum::connect_checked(addr, network)?)
 }
 
 fn load_state(dir: &Path) -> Result<State> {
@@ -315,10 +315,16 @@ fn deploy(
 ) -> Result<()> {
     let params = Params::load_or_setup(&cli.params)?;
     let op = Wallet::open(operator_wallet)?;
+    let mut e = connect(cli, network)?;
+    let activation_hash = activation
+        .checked_sub(1)
+        .map(|h| e.block_hash(h))
+        .transpose()?;
     let dep = Deployment {
         network,
         fee_rate_sat_vb: fee_rate,
         activation,
+        activation_hash,
         vault_script_pubkey: op.vault_key()?.script_pubkey(),
         operator_address: op.address().to_string(),
         vk_fingerprint: params.vk_fingerprint(),
@@ -329,7 +335,9 @@ fn deploy(
         &dep,
     )?;
     println!(
-        "network {network}\nfee rate {fee_rate} sat/vB\nactivation {activation}\nvault {}\noperator {}\nvk {}",
+        "network {network}\nfee rate {fee_rate} sat/vB\nactivation {activation}\nactivation hash {}\nvault {}\noperator {}\nvk {}",
+        dep.activation_hash
+            .map_or("none".to_owned(), |h| h.to_string()),
         op.vault_key()?.address(network),
         dep.operator_address,
         dep.vk_fingerprint
