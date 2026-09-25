@@ -1,11 +1,12 @@
 # shielded-btc-probe
 
-An implementation of the transfer layer from [Shielded Bitcoin: Private
-Transfers on the Bitcoin L1](https://www.allocinit.xyz/uploads/shielded-bitcoin.pdf) (Shikhelman,
-Komarov, Moskvin, 24 September 2026): notes, nullifiers, a Groth16 transfer
-proof, OP_RETURN publication, deterministic replay, wallet scanning and sender
-recovery, on Bitcoin and on the Bitsaga Signet. The Groth16 setup is derived
-from a public seed, so anyone can forge a proof: never hold value with it.
+**Proof of concept. Insecure by design. Not usable today.** This repo proves
+the mechanism of [Shielded Bitcoin: Private Transfers on the Bitcoin L1](https://www.allocinit.xyz/uploads/shielded-bitcoin.pdf)
+(Shikhelman, Komarov, Moskvin, 24 September 2026) on chain: notes, nullifiers, a
+Groth16 transfer proof, OP_RETURN publication, deterministic replay, wallet
+scanning and sender recovery, run on Bitcoin mainnet and on the Bitsaga Signet
+with test amounts. The Groth16 setup comes from a public seed, so anyone can forge
+a proof. The peg in and out is a single key we hold. Never hold value with it.
 
 ## Build and run
 
