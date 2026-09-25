@@ -1,5 +1,6 @@
 //! Deterministic replay of accepted envelopes into shielded state
-//! (paper sections 8, 15, A.6, A.7).
+//! (paper sections 8, 15, A.6, A.7). The deployment profile fixes the
+//! network, Bitcoin or the Bitsaga Signet, along with the activation height.
 
 use crate::{
     Fr, K_MIN, N_OUT, WINDOW_W,

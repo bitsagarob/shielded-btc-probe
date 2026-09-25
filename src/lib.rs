@@ -2,7 +2,8 @@
 //!
 //! A deliberately small implementation of the transfer layer described in
 //! "Shielded Bitcoin: Private Transfers on the Bitcoin L1" (Shikhelman,
-//! Komarov, Moskvin, 24 Sep 2026), built to run against the Bitsaga Signet.
+//! Komarov, Moskvin, 24 Sep 2026). It runs on Bitcoin and on the Bitsaga
+//! Signet; the deployment profile (`indexer::Deployment`) selects the network.
 //! It is a probe, not a product: the trusted setup is deterministic and
 //! therefore insecure, the peg is a single operator key, and every hash that
 //! the paper leaves open is instantiated with Poseidon over BLS12-381 Fr.

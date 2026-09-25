@@ -1,5 +1,6 @@
-//! Bitcoin side: an Electrum-protocol client for the signet's Fulcrum, and
-//! the carrier transaction that publishes an envelope in one OP_RETURN.
+//! Bitcoin side: an Electrum-protocol client over plain TCP (Bitcoin or the
+//! Bitsaga Signet, chosen by the deployment profile), and the carrier
+//! transaction that publishes an envelope in one OP_RETURN.
 
 use crate::envelope::MAGIC;
 use bitcoin::{
