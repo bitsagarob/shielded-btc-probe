@@ -8,6 +8,8 @@
 //! the paper leaves open is instantiated with Poseidon over BLS12-381 Fr.
 //! See PROFILE.md for every deviation from the paper.
 
+#![forbid(unsafe_code)]
+
 pub mod chain;
 pub mod circuit;
 pub mod envelope;
