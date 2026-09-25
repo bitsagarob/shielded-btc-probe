@@ -43,6 +43,8 @@ pub enum Error {
 pub struct Deployment {
     #[serde(default = "default_network")]
     pub network: Network,
+    #[serde(default = "default_fee_rate")]
+    pub fee_rate_sat_vb: u64,
     pub activation: u32,
     pub vault_script_pubkey: ScriptBuf,
     pub operator_address: String,
@@ -51,6 +53,10 @@ pub struct Deployment {
 
 fn default_network() -> Network {
     Network::Signet
+}
+
+fn default_fee_rate() -> u64 {
+    2
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

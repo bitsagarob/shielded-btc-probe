@@ -62,6 +62,9 @@ enum Cmd {
         operator_wallet: PathBuf,
         #[arg(long, default_value = "signet", value_parser = parse_network)]
         network: Network,
+        /// Fee rate in sat/vB for every carrier and payout on this deployment.
+        #[arg(long, default_value_t = 2)]
+        fee_rate: u64,
     },
     /// Create a wallet file.
     Init {
@@ -204,7 +207,8 @@ fn main() -> Result<()> {
             activation,
             operator_wallet,
             network,
-        } => deploy(&cli, *activation, operator_wallet, *network),
+            fee_rate,
+        } => deploy(&cli, *activation, operator_wallet, *network, *fee_rate),
         Cmd::Init { network } => init(&cli, *network),
         Cmd::Address { network } => address(&cli, *network),
         Cmd::Sync => sync(&cli),
@@ -257,11 +261,18 @@ fn bench() -> Result<()> {
     Ok(())
 }
 
-fn deploy(cli: &Cli, activation: u32, operator_wallet: &Path, network: Network) -> Result<()> {
+fn deploy(
+    cli: &Cli,
+    activation: u32,
+    operator_wallet: &Path,
+    network: Network,
+    fee_rate: u64,
+) -> Result<()> {
     let params = Params::load_or_setup(&cli.params)?;
     let op = Wallet::open(operator_wallet)?;
     let dep = Deployment {
         network,
+        fee_rate_sat_vb: fee_rate,
         activation,
         vault_script_pubkey: op.vault().script_pubkey(),
         operator_address: op.address().to_string(),
@@ -273,7 +284,7 @@ fn deploy(cli: &Cli, activation: u32, operator_wallet: &Path, network: Network) 
         &dep,
     )?;
     println!(
-        "network {network}\nactivation {activation}\nvault {}\noperator {}\nvk {}",
+        "network {network}\nfee rate {fee_rate} sat/vB\nactivation {activation}\nvault {}\noperator {}\nvk {}",
         op.vault().address(network),
         dep.operator_address,
         dep.vk_fingerprint
@@ -312,9 +323,9 @@ fn mint(cli: &Cli, amount: u64) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
     let st = load_state(&cli.state)?;
     let mut e = connect(cli, st.deployment.network)?;
-    let (txid, bytes, vsize) = w.mint(&mut e, &st.deployment.vault_script_pubkey, amount)?;
+    let (txid, bytes, vsize, fee) = w.mint(&mut e, &st.deployment, amount)?;
     println!(
-        "mint txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, paid {amount} sat to the vault"
+        "mint txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, fee {fee} sat, paid {amount} sat to the vault"
     );
     Ok(())
 }
@@ -366,9 +377,9 @@ fn send(cli: &Cli, to: &str, amount: u64) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
     w.scan(&st)?;
     let to: Address = to.parse()?;
-    let (txid, bytes, vsize, prove_s) = w.send(&mut e, &st, &params, &to, amount, None)?;
+    let (txid, bytes, vsize, prove_s, fee) = w.send(&mut e, &st, &params, &to, amount, None)?;
     println!(
-        "send txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, proof {prove_s:.2}s, anchor {}",
+        "send txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, fee {fee} sat, proof {prove_s:.2}s, anchor {}",
         st.replayed_height
     );
     Ok(())
@@ -387,20 +398,29 @@ fn redeem(cli: &Cli, amount: u64, to: &str) -> Result<()> {
         amount,
         script_pubkey: addr.script_pubkey().to_bytes(),
     };
-    let (txid, bytes, vsize, prove_s) = w.send(&mut e, &st, &params, &op, amount, Some(payout))?;
-    println!("redeem txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, proof {prove_s:.2}s");
+    let (txid, bytes, vsize, prove_s, fee) =
+        w.send(&mut e, &st, &params, &op, amount, Some(payout))?;
+    println!(
+        "redeem txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, fee {fee} sat, proof {prove_s:.2}s"
+    );
     Ok(())
 }
 
 fn publish_raw(cli: &Cli, hex: &str) -> Result<()> {
     let w = Wallet::open(cli.wallet()?)?;
-    let mut e = connect(cli, load_deployment(&cli.state)?.network)?;
+    let dep = load_deployment(&cli.state)?;
+    let mut e = connect(cli, dep.network)?;
     let payload = hex::decode(hex)?;
     let utxos = w.funding_utxos(&mut e)?;
-    let tx = w.funding.build_carrier(&utxos, &payload, vec![])?;
+    let (tx, fee) = w
+        .funding
+        .build_carrier(&utxos, &payload, vec![], dep.fee_rate_sat_vb)?;
     let vsize = tx.vsize();
     let txid = e.broadcast(&tx)?;
-    println!("published {} bytes in {txid}, {vsize} vB", payload.len());
+    println!(
+        "published {} bytes in {txid}, {vsize} vB, fee {fee} sat",
+        payload.len()
+    );
     Ok(())
 }
 
@@ -410,9 +430,10 @@ fn payouts(cli: &Cli) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
     w.scan(&st)?;
     let done = w.process_payouts(&mut e, &st)?;
-    for (req, amount, paid) in &done {
-        println!("paid {amount} sat for {req} in {paid}");
+    for (req, amount, fee, paid) in &done {
+        println!("paid {amount} sat for {req} in {paid}, fee {fee} sat");
     }
+
     if done.is_empty() {
         println!("nothing to pay");
     }

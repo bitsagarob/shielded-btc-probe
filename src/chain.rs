@@ -21,7 +21,6 @@ use std::{
 
 pub const DEFAULT_ELECTRUM: &str = "127.0.0.1:50001";
 pub const DEFAULT_ELECTRUM_BITCOIN: &str = "127.0.0.1:50011";
-pub const FEE_RATE_SAT_VB: u64 = 2;
 
 pub fn default_electrum(network: Network) -> &'static str {
     match network {
@@ -257,13 +256,15 @@ impl FundingKey {
     }
 
     /// Builds and signs a transaction: `extra` outputs first, then one
-    /// OP_RETURN carrying `payload`, then change back to this key.
+    /// OP_RETURN carrying `payload`, then change back to this key. Returns
+    /// the transaction and the fee it pays in sat.
     pub fn build_carrier(
         &self,
         utxos: &[Utxo],
         payload: &[u8],
         extra: Vec<TxOut>,
-    ) -> Result<Transaction, Error> {
+        fee_rate_sat_vb: u64,
+    ) -> Result<(Transaction, u64), Error> {
         let spk = self.script_pubkey();
         let extra_total: u64 = extra.iter().map(|o| o.value.to_sat()).sum();
         let op_return = TxOut {
@@ -291,11 +292,13 @@ impl FundingKey {
             let mut outputs = extra.clone();
             outputs.push(op_return.clone());
             let change = total - extra_total - fee;
+            let mut paid = total - extra_total;
             if change >= 546 {
                 outputs.push(TxOut {
                     value: Amount::from_sat(change),
                     script_pubkey: spk.clone(),
                 });
+                paid = fee;
             }
             let mut tx = Transaction {
                 version: transaction::Version::TWO,
@@ -312,9 +315,9 @@ impl FundingKey {
                 output: outputs,
             };
             self.sign_p2wpkh(&mut tx, &selected)?;
-            let want = tx.vsize() as u64 * FEE_RATE_SAT_VB;
+            let want = tx.vsize() as u64 * fee_rate_sat_vb;
             if fee >= want {
-                return Ok(tx);
+                return Ok((tx, paid));
             }
             fee = want;
         }
@@ -411,9 +414,12 @@ mod tests {
             height: 1,
         }];
         let payload = vec![7u8; 700];
-        let tx = k.build_carrier(&utxos, &payload, vec![]).unwrap();
+        let (tx, fee) = k.build_carrier(&utxos, &payload, vec![], 2).unwrap();
         assert_eq!(op_return_payload(&tx), Ok(Some(payload)));
         assert_eq!(tx.output.len(), 2);
+        assert!(fee >= tx.vsize() as u64 * 2);
+        assert_eq!(fee, 100_000 - tx.output[1].value.to_sat());
+
         log::info!("carrier vsize {} vB for a 700 byte envelope", tx.vsize());
     }
 }

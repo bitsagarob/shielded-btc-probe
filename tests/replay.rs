@@ -21,6 +21,7 @@ const VAULT: &str = "00140000000000000000000000000000000000000000";
 fn dep() -> Deployment {
     Deployment {
         network: Network::Signet,
+        fee_rate_sat_vb: 2,
         activation: 1000,
         vault_script_pubkey: ScriptBuf::from_hex(VAULT).unwrap(),
         operator_address: String::new(),

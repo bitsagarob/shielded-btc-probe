@@ -3,10 +3,10 @@
 
 use crate::{
     Fr, Fs, N_IN, N_OUT, TREE_DEPTH, WINDOW_W,
-    chain::{self, Electrum, FEE_RATE_SAT_VB, FundingKey, Utxo, op_return_payload},
+    chain::{self, Electrum, FundingKey, Utxo, op_return_payload},
     circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness},
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, Payout, TransferEnvelope},
-    indexer::{self, Event, State},
+    indexer::{self, Deployment, Event, State},
     keys::{self, Address, DIVERSIFIER_LEN, SpendingKeys, WalletKeys},
     note::{self, NotePlaintext},
     prover::{self, Params},
@@ -468,13 +468,14 @@ impl Wallet {
     }
 
     /// Peg-in: pay `amount` to the vault and publish a plaintext mint note
-    /// to our own address in the same carrier.
+    /// to our own address in the same carrier. Returns (txid, envelope
+    /// bytes, vsize, fee sat).
     pub fn mint(
         &mut self,
         client: &mut Electrum,
-        vault_spk: &ScriptBuf,
+        dep: &Deployment,
         amount: u64,
-    ) -> Result<(Txid, usize, usize), Error> {
+    ) -> Result<(Txid, usize, usize, u64), Error> {
         let addr = self.address();
         let r_seed = Fr::rand(&mut rand::thread_rng());
         let env = Envelope::Mint(MintEnvelope {
@@ -484,21 +485,23 @@ impl Wallet {
         });
         let payload = env.to_bytes();
         let utxos = self.funding_utxos(client)?;
-        let tx = self.funding.build_carrier(
+        let (tx, fee) = self.funding.build_carrier(
             &utxos,
             &payload,
             vec![TxOut {
                 value: Amount::from_sat(amount),
-                script_pubkey: vault_spk.clone(),
+                script_pubkey: dep.vault_script_pubkey.clone(),
             }],
+            dep.fee_rate_sat_vb,
         )?;
         let vsize = tx.vsize();
         let txid = client.broadcast(&tx)?;
-        Ok((txid, payload.len(), vsize))
+        Ok((txid, payload.len(), vsize, fee))
     }
 
     /// Builds, proves and publishes a transfer of `amount` to `to`, with an
-    /// optional peg-out request. Returns (txid, envelope bytes, vsize, prove seconds).
+    /// optional peg-out request. Returns (txid, envelope bytes, vsize, prove
+    /// seconds, fee sat).
     pub fn send(
         &mut self,
         client: &mut Electrum,
@@ -507,7 +510,7 @@ impl Wallet {
         to: &Address,
         amount: u64,
         payout: Option<Payout>,
-    ) -> Result<(Txid, usize, usize, f64), Error> {
+    ) -> Result<(Txid, usize, usize, f64, u64), Error> {
         if amount == 0 {
             return Err(Error::ZeroAmount);
         }
@@ -624,7 +627,12 @@ impl Wallet {
 
         let payload = env.to_bytes();
         let utxos = self.funding_utxos(client)?;
-        let tx = self.funding.build_carrier(&utxos, &payload, vec![])?;
+        let (tx, fee) = self.funding.build_carrier(
+            &utxos,
+            &payload,
+            vec![],
+            state.deployment.fee_rate_sat_vb,
+        )?;
         let vsize = tx.vsize();
         let txid = client.broadcast(&tx)?;
         for &i in &chosen {
@@ -632,17 +640,17 @@ impl Wallet {
             self.file.notes[i].lock_anchor = Some(h_anchor);
         }
         self.save()?;
-        Ok((txid, payload.len(), vsize, prove_s))
+        Ok((txid, payload.len(), vsize, prove_s, fee))
     }
 
     /// Operator only: pay every accepted peg-out request addressed to us
     /// that has not been paid yet. The fee comes out of the request. Returns
-    /// (request txid, sat paid, payout txid) per payout made.
+    /// (request txid, sat paid, fee sat, payout txid) per payout made.
     pub fn process_payouts(
         &mut self,
         client: &mut Electrum,
         state: &State,
-    ) -> Result<Vec<(Txid, u64, Txid)>, Error> {
+    ) -> Result<Vec<(Txid, u64, u64, Txid)>, Error> {
         let der = self.keys.derive();
         let vault_spk = self.vault.script_pubkey();
         // Payout carriers spend the vault and publish nf[0] in their OP_RETURN,
@@ -695,10 +703,10 @@ impl Wallet {
             }
             // Chain trouble leaves the request pending; only the request itself
             // can be refused.
-            let tx = match validate_payout(p, n.v, state.deployment.network)
-                .and_then(|_| self.build_payout(client, p, &nf))
+            let (tx, fee) = match validate_payout(p, n.v, state.deployment.network)
+                .and_then(|_| self.build_payout(client, p, &nf, state.deployment.fee_rate_sat_vb))
             {
-                Ok(tx) => tx,
+                Ok(built) => built,
                 Err(Error::Chain(err)) => {
                     log::warn!("payout in {} deferred: {err}", t.txid);
                     continue;
@@ -715,7 +723,7 @@ impl Wallet {
                 Ok(paid) => {
                     self.file.payout_txids.push(paid);
                     self.save()?;
-                    done.push((t.txid, tx.output[0].value.to_sat(), paid));
+                    done.push((t.txid, tx.output[0].value.to_sat(), fee, paid));
                 }
                 Err(err) => {
                     self.file.paid_payouts.retain(|k| k != &key);
@@ -732,7 +740,8 @@ impl Wallet {
         client: &mut Electrum,
         p: &Payout,
         nf: &[u8],
-    ) -> Result<Transaction, Error> {
+        fee_rate_sat_vb: u64,
+    ) -> Result<(Transaction, u64), Error> {
         let mut utxos = client.listunspent(&self.vault.script_pubkey())?;
         utxos.sort_by_key(|u| Reverse(u.value));
         let out = |v: u64| {
@@ -741,15 +750,21 @@ impl Wallet {
                 script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()),
             }]
         };
-        let fee =
-            self.vault.build_carrier(&utxos, nf, out(p.amount))?.vsize() as u64 * FEE_RATE_SAT_VB;
+        let fee = self
+            .vault
+            .build_carrier(&utxos, nf, out(p.amount), fee_rate_sat_vb)?
+            .0
+            .vsize() as u64
+            * fee_rate_sat_vb;
         if p.amount < fee + 546 {
             return Err(Error::PayoutBelowFee {
                 amount: p.amount,
                 fee,
             });
         }
-        Ok(self.vault.build_carrier(&utxos, nf, out(p.amount - fee))?)
+        Ok(self
+            .vault
+            .build_carrier(&utxos, nf, out(p.amount - fee), fee_rate_sat_vb)?)
     }
 
     fn fail_payout(&mut self, txid: &Txid, key: String, err: Error) -> Result<(), Error> {

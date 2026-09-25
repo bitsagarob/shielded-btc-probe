@@ -25,6 +25,7 @@ fn tmp(name: &str) -> std::path::PathBuf {
 fn fresh_state(op: &Wallet) -> State {
     State::fresh(Deployment {
         network: Network::Signet,
+        fee_rate_sat_vb: 2,
         activation: 10,
         vault_script_pubkey: op.vault().script_pubkey(),
         operator_address: op.address().to_string(),
