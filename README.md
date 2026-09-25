@@ -35,6 +35,33 @@ Both wallets had notes from the first deployment; on the first scan against the
 new history they detected the changed event log and rescanned from activation.
 The operator's scan records the burned 400,000 sat output as spent.
 
+## Bitcoin mainnet (25 September 2026, activation 968530, fee rate 3 sat/vB)
+
+Profile as committed in `deployments/mainnet.json`. Every transaction is public on
+mempool.space.
+
+| Step | Height | Transaction |
+|---|---|---|
+| Mint 15,000 sat to alice, 81-byte envelope, fee 702 sat | 968530 | `3529901cc6b914e04bd9ec1c242ec9527ac0cea0dfa64cc2516da56a24e8d49e` |
+| Mint 10,000 sat to bob | 968530 | `1a467ebf7ae1cbea3612ba84676ded33ad2be65e1d9f725687deda91902708e5` |
+| alice pays bob 5,000 shielded, 669-byte envelope, 793 vB, fee 2,382 sat, proof 1.89 s | 968533 | `5c3a5857e9fe9aa98ccb18e52b1a229fcac542caf4e46b499de8efd4bdec3751` |
+| bob redeems 12,000 spending two notes, 699-byte envelope, 892 vB, fee 2,676 sat | 968537 | `515a51d7c197d52c10a772dbd23fa401177d4d52ab758819963c33afed78fa49` |
+| operator pays 11,448 sat (12,000 minus the 552 sat fee) with `payouts --only` | mempool | `2e21f3f9c1241f02abf62cd1e0cf4cfeb14b8c39b3c09bfb659a6cf733faa1d4` |
+
+Wallets with the K_wallet = 2 policy waited two blocks after each note before
+spending it. The 669-byte OP_RETURN relayed to mempool.space within seconds.
+
+## Signet, third run under the aligned profile (25 September 2026, activation 152595)
+
+| Step | Height | Transaction |
+|---|---|---|
+| Mint 500,000 sat to alice | 152597 | `86e0a657198d14ced368ce793d5c5048ed7e2dc14b164712fbdd78458c12fd2e` |
+| Mint 300,000 sat to bob | 152597 | `a1b28f50dfb61d6121b8e81d42e9221d2e9cd236972b1e81d2b19e3132cb2574` |
+| alice pays bob 120,000, 669 bytes, proof 1.92 s | 152599 | `8be6d3b052bfaf9a8e65a3d3805aecb2e34f525206f5a0ecdb5b1484490916ac` |
+| bob redeems 400,000, 699 bytes, proof 1.95 s | 152601 | `93ff54d7e6b57202d1a064c5bc41e4855e9bb042add198a8760721411bee873f` |
+| operator pays 399,632 sat | 152603 | `43aa5749078cbfee57d7f532fd07a182089b2d1954e2f42871cc4b68856f1d66` |
+| transfer envelope republished | 152603 | `bd2121237df3b42675b140f9019b6fc6fe278d7dddd290ed4df6246a4343b296` rejected: nullifier already spent |
+
 The indexer reads the chain through Fulcrum's Electrum protocol
 (`transaction.id_from_pos` enumerates each block), so it needs no node RPC.
 

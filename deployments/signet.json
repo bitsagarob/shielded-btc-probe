@@ -1,0 +1,8 @@
+{
+  "network": "signet",
+  "fee_rate_sat_vb": 2,
+  "activation": 152595,
+  "vault_script_pubkey": "0014df93595b62ce14766643c13d05a045f69588d0ad",
+  "operator_address": "sbp119d7733e700360592f72576064f89216cc859461025a58b44fae1fd145ecc9e54d2186fe61a88625b67089",
+  "vk_fingerprint": "48a3890419e134a4"
+}

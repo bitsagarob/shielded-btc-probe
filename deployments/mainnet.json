@@ -1,0 +1,8 @@
+{
+  "network": "bitcoin",
+  "fee_rate_sat_vb": 3,
+  "activation": 968530,
+  "vault_script_pubkey": "0014ddfaf238ba2e08fb7401c107ecdd6781464b9468",
+  "operator_address": "sbp1284d0a62885f4bcc319b3e3e5ddeae69555a4b377a40002b29beda3b6769d49712d5654a9744f1cb8add9e",
+  "vk_fingerprint": "48a3890419e134a4"
+}
