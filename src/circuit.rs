@@ -356,7 +356,8 @@ pub struct NativeStatement {
     pub ct: [note::Ciphertext; N_OUT],
 }
 
-pub fn evaluate(w: &TransferWitness) -> NativeStatement {
+/// Err when an output diversifier has no diversified base.
+pub fn evaluate(w: &TransferWitness) -> Result<NativeStatement, keys::Error> {
     let sk_nf = keys::derive_sk_nf(&w.sk_spend);
     let nf = std::array::from_fn(|i| {
         let inp = &w.inputs[i];
@@ -378,11 +379,11 @@ pub fn evaluate(w: &TransferWitness) -> NativeStatement {
             },
             &o.pk_d,
         )
-        .expect("output diversifiers were checked by Address::from_str");
+        .ok_or(keys::Error::NoDiversifiedBase)?;
         pk_eph[j] = p;
         ct[j] = c;
     }
-    NativeStatement { nf, pk_eph, ct }
+    Ok(NativeStatement { nf, pk_eph, ct })
 }
 
 /// Recomputes the leaf of an input note the way the circuit does. None when
@@ -417,9 +418,9 @@ pub mod sample {
         let alice = WalletKeys::from_seed([11u8; 32]);
         let bob = WalletKeys::from_seed([22u8; 32]);
         let der = alice.derive();
-        let a0 = alice.address(0);
-        let a1 = alice.address(1);
-        let b0 = bob.address(0);
+        let a0 = alice.address(0).expect("fixed seed");
+        let a1 = alice.address(1).expect("fixed seed");
+        let b0 = bob.address(0).expect("fixed seed");
         let mut tree = MerkleTree::new();
         // One mint note and one ciphertext note owned by alice.
         let mint = InputWitness {
@@ -432,7 +433,7 @@ pub mod sample {
             j: 0,
             path: MerklePath {
                 pos: 0,
-                siblings: vec![],
+                siblings: [Fr::ZERO; TREE_DEPTH],
             },
         };
         let ctn = InputWitness {
@@ -445,7 +446,7 @@ pub mod sample {
             j: 1,
             path: MerklePath {
                 pos: 0,
-                siblings: vec![],
+                siblings: [Fr::ZERO; TREE_DEPTH],
             },
         };
         let p0 = tree.append(input_leaf(&der.sk_spend, &mint).unwrap());
@@ -474,7 +475,7 @@ pub mod sample {
                 },
             ],
         };
-        let st = evaluate(&w);
+        let st = evaluate(&w).expect("fixed seeds");
         let digest = crate::envelope::statement_digest(&w.h_body, &st.nf, &st.pk_eph, &st.ct);
         (
             w,

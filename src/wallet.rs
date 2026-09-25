@@ -104,6 +104,10 @@ pub enum Error {
     NoVaultKey,
     #[error("note values overflow u64")]
     Overflow,
+    #[error("replayed height overflows u32")]
+    HeightOverflow,
+    #[error(transparent)]
+    Keys(#[from] keys::Error),
 }
 
 /// Deposits above this on bitcoin need an explicit override.
@@ -220,6 +224,7 @@ pub struct Wallet {
     pub path: PathBuf,
     pub file: WalletFile,
     pub keys: WalletKeys,
+    address: Address,
     funding: Option<FundingKey>,
     vault: Option<FundingKey>,
     /// Exclusive flock on `<path>.lock` for the wallet's lifetime; the wallet
@@ -321,9 +326,11 @@ impl Wallet {
         let key = |k: &Option<[u8; 32]>| k.as_ref().map(FundingKey::from_bytes).transpose();
         let funding = key(&file.funding_sk).map_err(Error::FundingKey)?;
         let vault = key(&file.vault_sk).map_err(Error::VaultKey)?;
+        let keys = WalletKeys::from_seed(file.seed);
         Ok(Self {
             path,
-            keys: WalletKeys::from_seed(file.seed),
+            address: keys.address(0)?,
+            keys,
             funding,
             vault,
             file,
@@ -377,7 +384,7 @@ impl Wallet {
     }
 
     pub fn address(&self) -> Address {
-        self.keys.address(0)
+        self.address.clone()
     }
 
     pub fn funding_key(&self) -> Result<&FundingKey, Error> {
@@ -427,7 +434,7 @@ impl Wallet {
                     &n,
                     MerklePath {
                         pos: n.pos,
-                        siblings: vec![],
+                        siblings: [Fr::from(0u64); TREE_DEPTH],
                     },
                 ),
             );
@@ -668,7 +675,11 @@ impl Wallet {
             return Err(Error::ZeroAmount);
         }
         let der = self.keys.derive();
-        let h_anchor = (state.replayed_height + 1).saturating_sub(K_WALLET);
+        let h_anchor = state
+            .replayed_height
+            .checked_add(1)
+            .ok_or(Error::HeightOverflow)?
+            .saturating_sub(K_WALLET);
         let r_anchor = *state.roots.get(&h_anchor).ok_or(Error::NoRoot(h_anchor))?;
         let len = *state
             .leaf_counts
@@ -730,7 +741,7 @@ impl Wallet {
                 j: 0,
                 path: MerklePath {
                     pos: 0,
-                    siblings: vec![Fr::from(0u64); TREE_DEPTH],
+                    siblings: [Fr::from(0u64); TREE_DEPTH],
                 },
             });
         }
@@ -755,7 +766,7 @@ impl Wallet {
             inputs: inputs.clone().try_into().map_err(|_| Error::Arity)?,
             outputs: outputs.clone(),
         };
-        let st = circuit::evaluate(&w);
+        let st = circuit::evaluate(&w)?;
         if st.nf[0] == st.nf[1] {
             return Err(Error::DuplicateNullifier);
         }
@@ -947,12 +958,13 @@ impl Wallet {
                 script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()),
             }]
         };
-        let fee = vault
+        let fee = (vault
             .build_carrier(&utxos, nf, out(p.amount), fee_rate_sat_vb)?
             .0
-            .vsize() as u64
-            * fee_rate_sat_vb;
-        if p.amount < fee + 546 {
+            .vsize() as u64)
+            .checked_mul(fee_rate_sat_vb)
+            .ok_or(Error::Overflow)?;
+        if p.amount < fee.checked_add(546).ok_or(Error::Overflow)? {
             return Err(Error::PayoutBelowFee {
                 amount: p.amount,
                 fee,

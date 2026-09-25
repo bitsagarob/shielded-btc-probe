@@ -9,12 +9,13 @@ use bitcoin::{
 use serde_json::{Value, json};
 use shielded_probe::{
     EdwardsAffine, Fr,
-    chain::{ChainSource, Electrum, Error as ChainError, MockChain},
+    chain::{ChainSource, Electrum, Error as ChainError, FundingKey, MockChain, Utxo},
     envelope::{CT_OUT_LEN, Envelope, Error as EnvError, PROOF_LEN, Payout, TransferEnvelope},
     indexer::{Deployment, Error as IndexerError, MAX_REJECTIONS, Rejection, State},
     keys::{self, WalletKeys},
     note::{self, NotePlaintext},
     prover::Params,
+    wallet::{Error as WalletError, Wallet},
 };
 use std::{
     io::{BufRead, BufReader, Write},
@@ -41,9 +42,56 @@ fn dep() -> Deployment {
     }
 }
 
+fn tmp(name: &str) -> std::path::PathBuf {
+    let p = std::env::temp_dir().join(format!("sbp-robust-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_file(&p);
+    let _ = std::fs::remove_dir_all(&p);
+    p
+}
+
+fn utxo(value: u64) -> Utxo {
+    Utxo {
+        outpoint: bitcoin::OutPoint::new(Txid::all_zeros(), 0),
+        value,
+        height: 1,
+    }
+}
+
+#[test]
+fn build_carrier_refuses_to_overflow() {
+    let k = FundingKey::from_bytes(&[9u8; 32]).unwrap();
+    assert!(matches!(
+        k.build_carrier(&[utxo(500), utxo(u64::MAX)], b"x", vec![], 1),
+        Err(ChainError::Overflow)
+    ));
+    let extra = vec![bitcoin::TxOut {
+        value: bitcoin::Amount::from_sat(u64::MAX),
+        script_pubkey: ScriptBuf::new(),
+    }];
+    assert!(matches!(
+        k.build_carrier(&[utxo(100_000)], b"x", extra, 1),
+        Err(ChainError::Overflow)
+    ));
+    assert!(matches!(
+        k.build_carrier(&[utxo(100_000)], b"x", vec![], u64::MAX),
+        Err(ChainError::Overflow)
+    ));
+}
+
+#[test]
+fn build_transfer_at_replayed_height_u32_max_is_an_error() {
+    let op = Wallet::create(&tmp("op-h.json")).unwrap();
+    let mut st = State::fresh(dep());
+    st.replayed_height = u32::MAX;
+    assert!(matches!(
+        op.build_transfer(&st, params(), &op.address(), 1, None),
+        Err(WalletError::HeightOverflow)
+    ));
+}
+
 fn transfer() -> TransferEnvelope {
     let w = WalletKeys::from_seed([3u8; 32]);
-    let a = w.address(0);
+    let a = w.address(0).unwrap();
     let n = NotePlaintext {
         v: 5,
         d: a.d,
@@ -203,7 +251,7 @@ fn envelope_identity_is_accepted_and_small_order_points_are_rejected() {
 #[test]
 fn ciphertext_decrypting_above_the_packed_range_is_rejected() {
     let w = WalletKeys::from_seed([3u8; 32]);
-    let a = w.address(0);
+    let a = w.address(0).unwrap();
     let der = w.derive();
     let s = note::sk_eph(&Fr::from(8u64));
     let g_d = keys::diversify_hash(&a.d).unwrap().base;

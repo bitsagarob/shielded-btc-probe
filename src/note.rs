@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn encrypt_decrypts_for_recipient_and_sender() {
         let bob = WalletKeys::from_seed([1u8; 32]);
-        let addr = bob.address(3);
+        let addr = bob.address(3).unwrap();
         let note = NotePlaintext {
             v: 123_456,
             d: addr.d,

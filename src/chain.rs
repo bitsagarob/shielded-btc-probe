@@ -57,6 +57,8 @@ pub enum Error {
     WrongGenesis { expected: BlockHash, got: BlockHash },
     #[error("reply longer than {MAX_REPLY_BYTES} bytes")]
     ReplyTooLong,
+    #[error("amounts overflow u64")]
+    Overflow,
     #[error("block {0} reports more than {MAX_BLOCK_TXS} transactions")]
     BlockTooLarge(u32),
     #[error(transparent)]
@@ -316,7 +318,10 @@ impl FundingKey {
         fee_rate_sat_vb: u64,
     ) -> Result<(Transaction, u64), Error> {
         let spk = self.script_pubkey();
-        let extra_total: u64 = extra.iter().map(|o| o.value.to_sat()).sum();
+        let extra_total = extra
+            .iter()
+            .try_fold(0u64, |acc, o| acc.checked_add(o.value.to_sat()))
+            .ok_or(Error::Overflow)?;
         let op_return = TxOut {
             value: Amount::ZERO,
             script_pubkey: ScriptBuf::new_op_return(PushBytesBuf::try_from(payload.to_vec())?),
@@ -326,18 +331,17 @@ impl FundingKey {
         for _ in 0..6 {
             let mut selected = Vec::new();
             let mut total = 0u64;
+            let need = extra_total.checked_add(fee).ok_or(Error::Overflow)?;
+            let target = need.checked_add(546).ok_or(Error::Overflow)?;
             for u in utxos {
                 selected.push(u.clone());
-                total += u.value;
-                if total >= extra_total + fee + 546 {
+                total = total.checked_add(u.value).ok_or(Error::Overflow)?;
+                if total >= target {
                     break;
                 }
             }
-            if total < extra_total + fee {
-                return Err(Error::InsufficientFunds {
-                    have: total,
-                    need: extra_total + fee,
-                });
+            if total < need {
+                return Err(Error::InsufficientFunds { have: total, need });
             }
             let mut outputs = extra.clone();
             outputs.push(op_return.clone());
@@ -365,7 +369,9 @@ impl FundingKey {
                 output: outputs,
             };
             self.sign_p2wpkh(&mut tx, &selected)?;
-            let want = tx.vsize() as u64 * fee_rate_sat_vb;
+            let want = (tx.vsize() as u64)
+                .checked_mul(fee_rate_sat_vb)
+                .ok_or(Error::Overflow)?;
             if fee >= want {
                 return Ok((tx, paid));
             }

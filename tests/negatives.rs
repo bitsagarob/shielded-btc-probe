@@ -32,7 +32,7 @@ fn circuit_rejects_value_on_a_disabled_input() {
 #[test]
 fn decrypt_as_recipient_rejects_a_ciphertext_whose_r_seed_does_not_derive_pk_eph() {
     let bob = WalletKeys::from_seed([1u8; 32]);
-    let addr = bob.address(3);
+    let addr = bob.address(3).unwrap();
     let der = bob.derive();
     let honest_r = Fr::from(99u64);
     let g_d = keys::diversify_hash(&addr.d).unwrap().base;

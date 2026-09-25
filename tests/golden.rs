@@ -29,7 +29,11 @@ fn generate() -> Value {
     let alice = WalletKeys::from_seed([1u8; 32]);
     let bob = WalletKeys::from_seed([2u8; 32]);
     let (da, db) = (alice.derive(), bob.derive());
-    let (a0, a1, b0) = (alice.address(0), alice.address(1), bob.address(0));
+    let (a0, a1, b0) = (
+        alice.address(0).unwrap(),
+        alice.address(1).unwrap(),
+        bob.address(0).unwrap(),
+    );
     let div = keys::diversify_hash(&a0.d).unwrap();
 
     // One note to bob, one change note to alice, fixed r_seeds.

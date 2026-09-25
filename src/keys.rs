@@ -19,6 +19,12 @@ use std::{fmt, ops::Deref, str::FromStr};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const DIVERSIFIER_LEN: usize = 11;
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Error {
+    #[error("diversifier has no diversified base")]
+    NoDiversifiedBase,
+}
 /// Scalars derived in-circuit are truncated to this many bits so they are
 /// always below the Jubjub group order (about 2^251.8).
 pub const SCALAR_BITS: usize = 250;
@@ -245,10 +251,10 @@ impl WalletKeys {
         d
     }
 
-    /// Diversified payment address (d, pk_d) for a receive path index.
-    pub fn address(&self, index: u32) -> Address {
-        address_for(&self.viewing(), self.diversifier(index))
-            .expect("an own diversifier is off-curve with probability 2^-32")
+    /// Diversified payment address (d, pk_d) for a receive path index; an
+    /// index whose diversifier is off-curve (probability 2^-32) has none.
+    pub fn address(&self, index: u32) -> Result<Address, Error> {
+        address_for(&self.viewing(), self.diversifier(index)).ok_or(Error::NoDiversifiedBase)
     }
 }
 
@@ -356,9 +362,9 @@ mod tests {
     #[test]
     fn address_display_from_str_roundtrip() {
         let w = WalletKeys::from_seed([7u8; 32]);
-        let a = w.address(0);
+        let a = w.address(0).unwrap();
         assert_eq!(a.to_string().parse::<Address>().unwrap(), a);
-        assert_ne!(w.address(1).d, a.d);
+        assert_ne!(w.address(1).unwrap().d, a.d);
     }
 
     #[test]

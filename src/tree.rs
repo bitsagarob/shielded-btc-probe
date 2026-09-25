@@ -22,7 +22,7 @@ pub struct MerkleTree {
 pub struct MerklePath {
     pub pos: u64,
     /// Sibling at each level, leaf level first.
-    pub siblings: Vec<Fr>,
+    pub siblings: [Fr; TREE_DEPTH],
 }
 
 impl Default for MerkleTree {
@@ -86,10 +86,10 @@ impl MerkleTree {
         if pos >= self.len {
             return None;
         }
-        let mut siblings = Vec::with_capacity(TREE_DEPTH);
+        let mut siblings = [Fr::from(0u64); TREE_DEPTH];
         let mut idx = pos;
-        for level in 0..TREE_DEPTH {
-            siblings.push(self.get(level, idx ^ 1));
+        for (level, s) in siblings.iter_mut().enumerate() {
+            *s = self.get(level, idx ^ 1);
             idx >>= 1;
         }
         Some(MerklePath { pos, siblings })

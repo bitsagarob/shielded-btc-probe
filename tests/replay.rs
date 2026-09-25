@@ -64,7 +64,7 @@ fn params() -> &'static Params {
 
 fn transfer(h_anchor: u32) -> TransferEnvelope {
     let w = WalletKeys::from_seed([3u8; 32]);
-    let a = w.address(0);
+    let a = w.address(0).unwrap();
     let n = NotePlaintext {
         v: 5,
         d: a.d,
