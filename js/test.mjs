@@ -1,17 +1,18 @@
-// Runs every vector in webapp/shielded-data.json and shielded-data-mainnet.json
-// through webapp/shielded-verify.js with plain node (22 or later). Exits
-// non-zero on any mismatch.
+// Runs every vector in both data files through shielded-verify.js with plain
+// node (22 or later). The directory is either this repo's js/ (vectors-*.json)
+// or the bitsaga webapp (shielded-data*.json). Exits non-zero on any mismatch.
 //
-//   node js/test.mjs [path/to/bitsaga/webapp]
+//   node js/test.mjs [dir]
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
-const webapp = process.argv[2] || join(process.env.HOME, "apps/bitsaga/webapp");
+const webapp = resolve(process.argv[2] || join(process.env.HOME, "apps/bitsaga/webapp"));
 const SV = createRequire(import.meta.url)(join(webapp, "shielded-verify.js"));
+const pick = (a, b) => (existsSync(join(webapp, a)) ? a : b);
 let ok = true;
 
-for (const file of ["shielded-data.json", "shielded-data-mainnet.json"]) {
+for (const file of [pick("shielded-data.json", "vectors-signet.json"), pick("shielded-data-mainnet.json", "vectors-mainnet.json")]) {
   const data = JSON.parse(readFileSync(join(webapp, file), "utf8"));
   const t0 = Date.now();
   const r = await SV.selfTest(data);

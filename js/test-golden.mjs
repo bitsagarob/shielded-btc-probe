@@ -2,17 +2,18 @@
 // the Rust test golden_vectors_match pins. Poseidon constants come from the
 // exported data file; every expected value comes from the golden file.
 //
-//   node js/test-golden.mjs [webapp dir] [golden json]
+//   node js/test-golden.mjs [dir: this repo's js/ or the bitsaga webapp] [golden json]
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const webapp = process.argv[2] || join(process.env.HOME, "apps/bitsaga/webapp");
+const webapp = resolve(process.argv[2] || join(process.env.HOME, "apps/bitsaga/webapp"));
 const goldenPath = process.argv[3] || join(here, "..", "tests", "golden-vectors.json");
 const SV = createRequire(import.meta.url)(join(webapp, "shielded-verify.js"));
-const data = JSON.parse(readFileSync(join(webapp, "shielded-data.json"), "utf8"));
+const dataFile = existsSync(join(webapp, "shielded-data.json")) ? "shielded-data.json" : "vectors-signet.json";
+const data = JSON.parse(readFileSync(join(webapp, dataFile), "utf8"));
 const G = JSON.parse(readFileSync(goldenPath, "utf8"));
 SV.load(data);
 
