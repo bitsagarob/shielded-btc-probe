@@ -536,7 +536,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     op.scan(&st).unwrap();
     assert_eq!(op.balance(), 0);
     let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
-    let done = op.process_payouts(&mut e, &st).unwrap();
+    let done = op.process_payouts(&mut e, &st, None).unwrap();
     assert!(done.is_empty());
     let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
     assert!(op.file.failed_payouts[&key(1)].contains("below dust"));
@@ -548,7 +548,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     assert_eq!(op.file.paid_payouts, vec![old.to_string()]);
     let mut again = Wallet::open(&op.path).unwrap();
     assert_eq!(again.file.failed_payouts.len(), 2);
-    assert!(again.process_payouts(&mut e, &st).unwrap().is_empty());
+    assert!(again.process_payouts(&mut e, &st, None).unwrap().is_empty());
     assert_eq!(again.file.failed_payouts.len(), 2);
 }
 
@@ -643,7 +643,7 @@ fn hostile_state_event_bytes_are_an_error_not_a_panic() {
     let st = State::load(&p).unwrap();
     assert!(alice.scan(&st).is_err());
     let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
-    assert!(alice.process_payouts(&mut e, &st).is_err());
+    assert!(alice.process_payouts(&mut e, &st, None).is_err());
     let mut mint = fresh_state(&op);
     mint.events.push(Event::Mint(AcceptedMint {
         txid: Txid::all_zeros(),

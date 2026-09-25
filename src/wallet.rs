@@ -84,6 +84,10 @@ pub enum Error {
     PayoutBelowFee { amount: u64, fee: u64 },
     #[error("carrier {0} is still in the mempool or chain, pass --force to unlock anyway")]
     CarrierPresent(Txid),
+    #[error("on mainnet, pass --only <txid> for each request you have verified")]
+    PayoutsUnsupervised,
+    #[error("no accepted payout request in {0}")]
+    NoSuchRequest(Txid),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -644,13 +648,18 @@ impl Wallet {
     }
 
     /// Operator only: pay every accepted peg-out request addressed to us
-    /// that has not been paid yet. The fee comes out of the request. Returns
+    /// that has not been paid yet, or with `only` exactly that request. On
+    /// bitcoin `only` is required. The fee comes out of the request. Returns
     /// (request txid, sat paid, fee sat, payout txid) per payout made.
     pub fn process_payouts(
         &mut self,
         client: &mut Electrum,
         state: &State,
+        only: Option<Txid>,
     ) -> Result<Vec<(Txid, u64, u64, Txid)>, Error> {
+        if only.is_none() && state.deployment.network == Network::Bitcoin {
+            return Err(Error::PayoutsUnsupervised);
+        }
         let der = self.keys.derive();
         let vault_spk = self.vault.script_pubkey();
         // Payout carriers spend the vault and publish nf[0] in their OP_RETURN,
@@ -679,10 +688,15 @@ impl Wallet {
             }
         }
         let mut done = Vec::new();
+        let mut seen = false;
         for ev in &state.events {
             let Event::Transfer(t) = ev else { continue };
+            if only.is_some_and(|o| o != t.txid) {
+                continue;
+            }
             let env = t.envelope()?;
             let Some(p) = &env.payout else { continue };
+            seen = true;
             let nf = keys::fr_to_bytes(&env.nf[0]);
             let key = hex::encode(nf);
             if self.file.paid_payouts.contains(&key)
@@ -731,6 +745,9 @@ impl Wallet {
                     log::warn!("payout in {} deferred: {err}", t.txid);
                 }
             }
+        }
+        if let Some(o) = only.filter(|_| !seen) {
+            return Err(Error::NoSuchRequest(o));
         }
         Ok(done)
     }

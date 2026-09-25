@@ -111,7 +111,11 @@ enum Cmd {
         to: String,
     },
     /// Operator: pay accepted peg-out requests from the vault.
-    Payouts,
+    Payouts {
+        /// Pay only the request carried by this transaction; required on bitcoin.
+        #[arg(long)]
+        only: Option<String>,
+    },
     /// Show replayed state.
     Status,
     /// Publish arbitrary envelope bytes from a wallet's funding key. Used to
@@ -219,7 +223,7 @@ fn main() -> Result<()> {
         Cmd::Send { to, amount } => send(&cli, to, *amount),
         Cmd::Redeem { amount, to } => redeem(&cli, *amount, to),
         Cmd::PublishRaw { hex } => publish_raw(&cli, hex),
-        Cmd::Payouts => payouts(&cli),
+        Cmd::Payouts { only } => payouts(&cli, only.as_deref()),
         Cmd::ExportJs => export_js(&cli),
     }
 }
@@ -424,12 +428,14 @@ fn publish_raw(cli: &Cli, hex: &str) -> Result<()> {
     Ok(())
 }
 
-fn payouts(cli: &Cli) -> Result<()> {
+fn payouts(cli: &Cli, only: Option<&str>) -> Result<()> {
+    let only = only.map(str::parse).transpose()?;
     let params = Params::load_or_setup(&cli.params)?;
     let (st, mut e) = synced_state(cli, &params)?;
     let mut w = Wallet::open(cli.wallet()?)?;
     w.scan(&st)?;
-    let done = w.process_payouts(&mut e, &st)?;
+    let done = w.process_payouts(&mut e, &st, only)?;
+
     for (req, amount, fee, paid) in &done {
         println!("paid {amount} sat for {req} in {paid}, fee {fee} sat");
     }
