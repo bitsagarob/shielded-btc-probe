@@ -1,1 +1,5 @@
 /target
+params/
+state/
+state-main/
+*.local.json
