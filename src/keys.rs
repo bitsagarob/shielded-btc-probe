@@ -16,6 +16,7 @@ use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{fmt, ops::Deref, str::FromStr};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const DIVERSIFIER_LEN: usize = 11;
 /// Scalars derived in-circuit are truncated to this many bits so they are
@@ -174,14 +175,14 @@ pub fn is_even(x: &Fr) -> bool {
     !x.into_bigint().is_odd()
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct WalletKeys {
     pub seed: [u8; 32],
 }
 
 /// What a scanner needs: detect incoming notes and recover outgoing ones.
 /// Cannot spend.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ViewingKeys {
     pub vk_in: Fr,
     pub vk_out: [u8; 32],
@@ -189,7 +190,7 @@ pub struct ViewingKeys {
 }
 
 /// Derived material. Everything here is recomputable from the seed.
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SpendingKeys {
     /// Spend authorisation scalar (Table 1). Its canonical bytes feed sk_nf
     /// and vk_in; it never multiplies a point.
@@ -233,7 +234,7 @@ impl WalletKeys {
     }
 
     pub fn viewing(&self) -> ViewingKeys {
-        self.derive().viewing
+        self.derive().viewing.clone()
     }
 
     /// Diversifier of a receive path index.

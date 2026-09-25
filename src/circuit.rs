@@ -22,11 +22,12 @@ use ark_r1cs_std::{
     prelude::*,
 };
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub type PointVar = AffineVar<EdwardsConfig, FpVar<Fr>>;
 
 /// Everything the prover knows about one spent input.
-#[derive(Clone, Debug)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct InputWitness {
     pub enabled: bool,
     pub is_mint: bool,
@@ -36,10 +37,11 @@ pub struct InputWitness {
     /// Creation data for ciphertext-derived leaves (ignored for mints).
     pub h_body_create: Fr,
     pub j: u8,
+    #[zeroize(skip)]
     pub path: MerklePath,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct OutputWitness {
     pub v: u64,
     pub d: [u8; keys::DIVERSIFIER_LEN],
@@ -47,7 +49,7 @@ pub struct OutputWitness {
     pub pk_d: EdwardsAffine,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct TransferWitness {
     pub sk_spend: Fs,
     pub h_body: Fr,

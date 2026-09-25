@@ -22,6 +22,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex, OnceLock},
 };
+use zeroize::Zeroize;
 
 fn params() -> &'static Params {
     static P: OnceLock<Params> = OnceLock::new();
@@ -1094,4 +1095,25 @@ fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
             .is_empty()
     );
     assert_eq!(fake.lock().unwrap().broadcasts.len(), 1);
+}
+
+#[test]
+fn zeroize_clears_the_key_bytes_and_keeps_the_records() {
+    let op = Wallet::create(&tmp("op19")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice19")).unwrap();
+    let mut st = fresh_state(&op);
+    mint_to(&mut st, &alice, 1000, 5, 1);
+    alice.scan(&st).unwrap();
+    let mut f = alice.file.clone();
+    f.zeroize();
+    assert_eq!(f.seed, [0u8; 32]);
+    assert!(f.funding_sk.is_none() && f.vault_sk.is_none());
+    assert_eq!(f.notes.len(), 1);
+    assert_eq!(f.scanned_events, 1);
+    let mut der = alice.keys.derive();
+    let vk_out = der.viewing.vk_out;
+    der.zeroize();
+    assert_eq!(der.viewing.vk_out, [0u8; 32]);
+    assert_ne!(vk_out, [0u8; 32]);
+    assert_eq!(der.sk_spend, shielded_probe::Fs::from(0u64));
 }

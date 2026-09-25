@@ -27,6 +27,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -142,7 +143,7 @@ pub struct SentRecord {
     pub j: u8,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct WalletFile {
     #[serde(with = "crate::serde_hex::bytes")]
     pub seed: [u8; 32],
@@ -152,19 +153,26 @@ pub struct WalletFile {
     /// Operator only: the key holding the vault, separate from the fee key.
     #[serde(default, with = "opt_hex")]
     pub vault_sk: Option<[u8; 32]>,
+    #[zeroize(skip)]
     pub notes: Vec<OwnedNote>,
+    #[zeroize(skip)]
     pub sent: Vec<SentRecord>,
+    #[zeroize(skip)]
     pub scanned_events: usize,
     /// Txid of the last scanned event; a mismatch means replay history changed.
     #[serde(default)]
+    #[zeroize(skip)]
     pub scanned_txid: Option<Txid>,
     /// Peg-out requests paid, keyed by hex of nf[0] (older files hold carrier txids).
+    #[zeroize(skip)]
     pub paid_payouts: Vec<String>,
     /// Peg-out requests refused, hex of nf[0] to the reason.
     #[serde(default)]
+    #[zeroize(skip)]
     pub failed_payouts: BTreeMap<String, String>,
     /// Payout transactions this wallet broadcast.
     #[serde(default)]
+    #[zeroize(skip)]
     pub payout_txids: Vec<Txid>,
 }
 
@@ -220,7 +228,7 @@ pub struct Wallet {
 
 fn random_key() -> [u8; 32] {
     let mut b = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut b);
     b
 }
 fn event_txid(ev: &Event) -> Txid {
