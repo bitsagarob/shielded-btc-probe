@@ -7,7 +7,7 @@ use crate::{
     circuit::{self, InputWitness, OutputWitness, PublicInputs, TransferWitness},
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, Payout, TransferEnvelope},
     indexer::{self, Deployment, Event, State},
-    keys::{self, Address, DIVERSIFIER_LEN, SpendingKeys, WalletKeys},
+    keys::{self, Address, DIVERSIFIER_LEN, SpendingKeys, ViewingKeys, WalletKeys},
     note::{self, NotePlaintext},
     prover::{self, Params},
     tree::MerklePath,
@@ -17,11 +17,12 @@ use bitcoin::{
     Amount, Network, ScriptBuf, Transaction, TxOut, Txid, address::FromScriptError, secp256k1,
 };
 use fs2::FileExt;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashMap, HashSet},
     fs::File,
+    io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::Instant,
@@ -96,6 +97,10 @@ pub enum Error {
     DepositCapped(u64),
     #[error("wallet file is locked by another process")]
     Locked,
+    #[error("this wallet has no funding key")]
+    NoFundingKey,
+    #[error("this wallet has no vault key")]
+    NoVaultKey,
 }
 
 /// Deposits above this on bitcoin need an explicit override.
@@ -141,11 +146,12 @@ pub struct SentRecord {
 pub struct WalletFile {
     #[serde(with = "crate::serde_hex::bytes")]
     pub seed: [u8; 32],
-    #[serde(with = "crate::serde_hex::bytes")]
-    pub funding_sk: [u8; 32],
+    /// Pays for carriers. Absent in a viewing-only file.
+    #[serde(default, with = "opt_hex")]
+    pub funding_sk: Option<[u8; 32]>,
     /// Operator only: the key holding the vault, separate from the fee key.
-    #[serde(default, with = "crate::serde_hex::bytes")]
-    pub vault_sk: [u8; 32],
+    #[serde(default, with = "opt_hex")]
+    pub vault_sk: Option<[u8; 32]>,
     pub notes: Vec<OwnedNote>,
     pub sent: Vec<SentRecord>,
     pub scanned_events: usize,
@@ -162,6 +168,36 @@ pub struct WalletFile {
     pub payout_txids: Vec<Txid>,
 }
 
+mod opt_hex {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(v: &Option<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(b) => s.serialize_some(&hex::encode(b)),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[u8; 32]>, D::Error> {
+        use serde::de::Error;
+        Option::<String>::deserialize(d)?
+            .map(|h| {
+                <[u8; 32]>::try_from(hex::decode(h).map_err(D::Error::custom)?)
+                    .map_err(|_| D::Error::custom("expected 32 bytes"))
+            })
+            .transpose()
+    }
+}
+
+/// The viewing side of a wallet, written by `export-viewing`.
+#[derive(Serialize)]
+struct ViewingExport {
+    addresses: Vec<String>,
+    vk_in: String,
+    vk_out: String,
+    sk_view: String,
+}
+
 /// A proved transfer that has not been published.
 pub struct BuiltTransfer {
     pub envelope: TransferEnvelope,
@@ -174,8 +210,8 @@ pub struct Wallet {
     pub path: PathBuf,
     pub file: WalletFile,
     pub keys: WalletKeys,
-    pub funding: FundingKey,
-    vault: FundingKey,
+    funding: Option<FundingKey>,
+    vault: Option<FundingKey>,
     /// Exclusive flock on `<path>.lock` for the wallet's lifetime; the wallet
     /// file itself is replaced by rename on every save, so it cannot carry
     /// the lock.
@@ -234,8 +270,8 @@ impl Wallet {
         let lock = lock(path)?;
         let file = WalletFile {
             seed: random_key(),
-            funding_sk: random_key(),
-            vault_sk: random_key(),
+            funding_sk: Some(random_key()),
+            vault_sk: Some(random_key()),
             notes: vec![],
             sent: vec![],
             scanned_events: 0,
@@ -255,21 +291,26 @@ impl Wallet {
             path: path.to_path_buf(),
             source,
         })?;
-        let mut file: WalletFile = serde_json::from_reader(file)?;
-        let fill = file.vault_sk == [0u8; 32];
-        if fill {
-            file.vault_sk = random_key();
+        let file: WalletFile = serde_json::from_reader(file)?;
+        Self::from_file(path.to_path_buf(), file, lock)
+    }
+
+    /// Gives an older file its vault key. Returns whether anything changed.
+    pub fn migrate(&mut self) -> Result<bool, Error> {
+        if self.vault.is_some() {
+            return Ok(false);
         }
-        let w = Self::from_file(path.to_path_buf(), file, lock)?;
-        if fill {
-            w.save()?;
-        }
-        Ok(w)
+        let k = random_key();
+        self.vault = Some(FundingKey::from_bytes(&k).map_err(Error::VaultKey)?);
+        self.file.vault_sk = Some(k);
+        self.save()?;
+        Ok(true)
     }
 
     fn from_file(path: PathBuf, file: WalletFile, lock: File) -> Result<Self, Error> {
-        let funding = FundingKey::from_bytes(&file.funding_sk).map_err(Error::FundingKey)?;
-        let vault = FundingKey::from_bytes(&file.vault_sk).map_err(Error::VaultKey)?;
+        let key = |k: &Option<[u8; 32]>| k.as_ref().map(FundingKey::from_bytes).transpose();
+        let funding = key(&file.funding_sk).map_err(Error::FundingKey)?;
+        let vault = key(&file.vault_sk).map_err(Error::VaultKey)?;
         Ok(Self {
             path,
             keys: WalletKeys::from_seed(file.seed),
@@ -294,12 +335,41 @@ impl Wallet {
         Ok(())
     }
 
+    /// Viewing keys and addresses only, as a new 0600 JSON file.
+    pub fn export_viewing(&self, out: &Path) -> Result<(), Error> {
+        let vk = self.keys.viewing();
+        let export = ViewingExport {
+            addresses: vec![self.address().to_string()],
+            vk_in: hex::encode(keys::fr_to_bytes(&vk.vk_in)),
+            vk_out: hex::encode(vk.vk_out),
+            sk_view: hex::encode(keys::scalar_to_bytes(&vk.sk_view)),
+        };
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(out)?;
+        f.write_all(&serde_json::to_vec_pretty(&export)?)?;
+        f.sync_all()?;
+        Ok(())
+    }
+
     pub fn address(&self) -> Address {
         self.keys.address(0)
     }
 
+    pub fn funding_key(&self) -> Result<&FundingKey, Error> {
+        self.funding.as_ref().ok_or(Error::NoFundingKey)
+    }
+
+    pub fn vault_key(&self) -> Result<&FundingKey, Error> {
+        self.vault.as_ref().ok_or(Error::NoVaultKey)
+    }
+
+    /// The vault key of a wallet known to be an operator's. Panics on a
+    /// viewing-only or unmigrated file; commands use `vault_key`.
     pub fn vault(&self) -> FundingKey {
-        self.vault.clone()
+        self.vault.clone().expect("this wallet has no vault key")
     }
 
     pub fn balance(&self) -> u64 {
@@ -363,7 +433,7 @@ impl Wallet {
             match ev {
                 Event::Mint(m) => {
                     let env = m.envelope()?;
-                    if keys::address_for(&der, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
+                    if keys::address_for(&der.viewing, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
                         let n = OwnedNote {
                             v: m.value,
                             d: env.d,
@@ -390,9 +460,11 @@ impl Wallet {
                         }
                     }
                     for j in 0..N_OUT {
-                        let Some(n) =
-                            note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &der.sk_view)
-                        else {
+                        let Some(n) = note::decrypt_as_recipient(
+                            &env.ct[j],
+                            &env.pk_eph[j],
+                            &der.viewing.sk_view,
+                        ) else {
                             continue;
                         };
                         // Output 0 of a transfer carrying a payout is the peg-out
@@ -417,9 +489,11 @@ impl Wallet {
                     if !env.nf.iter().any(|nf| nfs.contains(nf)) {
                         continue;
                     }
-                    if let Some(records) =
-                        note::decrypt_recovery(&env.ct_out, &env.recovery_binding(), &der.vk_out)
-                    {
+                    if let Some(records) = note::decrypt_recovery(
+                        &env.ct_out,
+                        &env.recovery_binding(),
+                        &der.viewing.vk_out,
+                    ) {
                         for (j, (pk_d, sk_eph)) in records.iter().take(N_OUT).enumerate() {
                             if let Some(n) =
                                 note::decrypt_as_sender(&env.ct[j], &env.pk_eph[j], pk_d, sk_eph)
@@ -516,7 +590,7 @@ impl Wallet {
     }
 
     pub fn funding_utxos(&self, client: &mut Electrum) -> Result<Vec<Utxo>, Error> {
-        let mut u = client.listunspent(&self.funding.script_pubkey())?;
+        let mut u = client.listunspent(&self.funding_key()?.script_pubkey())?;
         u.sort_by_key(|u| Reverse(u.value));
         Ok(u)
     }
@@ -539,7 +613,7 @@ impl Wallet {
         });
         let payload = env.to_bytes();
         let utxos = self.funding_utxos(client)?;
-        let (tx, fee) = self.funding.build_carrier(
+        let (tx, fee) = self.funding_key()?.build_carrier(
             &utxos,
             &payload,
             vec![TxOut {
@@ -602,6 +676,7 @@ impl Wallet {
             });
         }
         let mut rng = rand::thread_rng();
+        let own = self.address();
         let mut inputs: Vec<InputWitness> = Vec::with_capacity(N_IN);
         for &i in &chosen {
             let n = &self.file.notes[i];
@@ -621,7 +696,7 @@ impl Wallet {
                 enabled: false,
                 is_mint: false,
                 v: 0,
-                d: self.address().d,
+                d: own.d,
                 r_seed: Fr::rand(&mut rng),
                 h_body_create: Fr::from(0u64),
                 j: 0,
@@ -631,7 +706,6 @@ impl Wallet {
                 },
             });
         }
-        let change_addr = self.address();
         let outputs = [
             OutputWitness {
                 v: amount,
@@ -641,9 +715,9 @@ impl Wallet {
             },
             OutputWitness {
                 v: total - amount,
-                d: change_addr.d,
+                d: own.d,
                 r_seed: Fr::rand(&mut rng),
-                pk_d: change_addr.pk_d,
+                pk_d: own.pk_d,
             },
         ];
 
@@ -672,7 +746,7 @@ impl Wallet {
             proof: vec![],
         };
         envelope.ct_out =
-            note::encrypt_recovery(&records, &envelope.recovery_binding(), &der.vk_out);
+            note::encrypt_recovery(&records, &envelope.recovery_binding(), &der.viewing.vk_out);
         if envelope.ct_out.len() != CT_OUT_LEN {
             return Err(Error::CtOutLength);
         }
@@ -709,7 +783,7 @@ impl Wallet {
         let built = self.build_transfer(state, params, to, amount, payout)?;
         let payload = built.envelope.to_bytes();
         let utxos = self.funding_utxos(client)?;
-        let (tx, fee) = self.funding.build_carrier(
+        let (tx, fee) = self.funding_key()?.build_carrier(
             &utxos,
             &payload,
             vec![],
@@ -738,8 +812,8 @@ impl Wallet {
         if only.is_none() && state.deployment.network == Network::Bitcoin {
             return Err(Error::PayoutsUnsupervised);
         }
-        let der = self.keys.derive();
-        let vault_spk = self.vault.script_pubkey();
+        let vk: ViewingKeys = self.keys.viewing();
+        let vault_spk = self.vault_key()?.script_pubkey();
         // Payout carriers spend the vault and publish nf[0] in their OP_RETURN,
         // so the chain itself says what was already paid. Mempool entries only
         // count when this wallet broadcast them.
@@ -784,7 +858,7 @@ impl Wallet {
                 continue;
             }
             // Convention: the burned value is output 0, sent to the operator.
-            let Some(n) = note::decrypt_as_recipient(&env.ct[0], &env.pk_eph[0], &der.sk_view)
+            let Some(n) = note::decrypt_as_recipient(&env.ct[0], &env.pk_eph[0], &vk.sk_view)
             else {
                 continue;
             };
@@ -836,7 +910,8 @@ impl Wallet {
         nf: &[u8],
         fee_rate_sat_vb: u64,
     ) -> Result<(Transaction, u64), Error> {
-        let mut utxos = client.listunspent(&self.vault.script_pubkey())?;
+        let vault = self.vault_key()?;
+        let mut utxos = client.listunspent(&vault.script_pubkey())?;
         utxos.sort_by_key(|u| Reverse(u.value));
         let out = |v: u64| {
             vec![TxOut {
@@ -844,8 +919,7 @@ impl Wallet {
                 script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()),
             }]
         };
-        let fee = self
-            .vault
+        let fee = vault
             .build_carrier(&utxos, nf, out(p.amount), fee_rate_sat_vb)?
             .0
             .vsize() as u64
@@ -856,9 +930,7 @@ impl Wallet {
                 fee,
             });
         }
-        Ok(self
-            .vault
-            .build_carrier(&utxos, nf, out(p.amount - fee), fee_rate_sat_vb)?)
+        Ok(vault.build_carrier(&utxos, nf, out(p.amount - fee), fee_rate_sat_vb)?)
     }
 
     fn fail_payout(&mut self, txid: &Txid, key: String, err: Error) -> Result<(), Error> {

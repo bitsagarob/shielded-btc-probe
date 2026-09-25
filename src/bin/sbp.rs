@@ -134,6 +134,15 @@ enum Cmd {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Write the wallet's viewing keys and addresses to a new 0600 file.
+    ExportViewing {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Print the wallet seed once, for a backup.
+    Seed,
+    /// Give an older wallet file its vault key.
+    Migrate,
 }
 
 impl Cli {
@@ -232,6 +241,31 @@ fn main() -> Result<()> {
         Cmd::PublishRaw { hex } => publish_raw(&cli, hex),
         Cmd::Payouts { only } => payouts(&cli, only.as_deref()),
         Cmd::ExportJs { label } => export_js(&cli, label.as_deref()),
+        Cmd::ExportViewing { out } => {
+            Wallet::open(cli.wallet()?)?.export_viewing(out)?;
+            println!("wrote viewing keys to {}", out.display());
+            Ok(())
+        }
+        Cmd::Seed => {
+            let w = Wallet::open(cli.wallet()?)?;
+            eprintln!(
+                "WARNING: this seed spends every note of the wallet; anyone who reads it can too"
+            );
+            println!("{}", hex::encode(w.file.seed));
+            Ok(())
+        }
+        Cmd::Migrate => {
+            let mut w = Wallet::open(cli.wallet()?)?;
+            println!(
+                "{}",
+                if w.migrate()? {
+                    "vault key added"
+                } else {
+                    "nothing to migrate"
+                }
+            );
+            Ok(())
+        }
     }
 }
 
@@ -285,7 +319,7 @@ fn deploy(
         network,
         fee_rate_sat_vb: fee_rate,
         activation,
-        vault_script_pubkey: op.vault().script_pubkey(),
+        vault_script_pubkey: op.vault_key()?.script_pubkey(),
         operator_address: op.address().to_string(),
         vk_fingerprint: params.vk_fingerprint(),
     };
@@ -296,7 +330,7 @@ fn deploy(
     )?;
     println!(
         "network {network}\nfee rate {fee_rate} sat/vB\nactivation {activation}\nvault {}\noperator {}\nvk {}",
-        op.vault().address(network),
+        op.vault_key()?.address(network),
         dep.operator_address,
         dep.vk_fingerprint
     );
@@ -429,9 +463,9 @@ fn publish_raw(cli: &Cli, hex: &str) -> Result<()> {
     let mut e = connect(cli, dep.network)?;
     let payload = hex::decode(hex)?;
     let utxos = w.funding_utxos(&mut e)?;
-    let (tx, fee) = w
-        .funding
-        .build_carrier(&utxos, &payload, vec![], dep.fee_rate_sat_vb)?;
+    let (tx, fee) =
+        w.funding_key()?
+            .build_carrier(&utxos, &payload, vec![], dep.fee_rate_sat_vb)?;
     let vsize = tx.vsize();
     let txid = e.broadcast(&tx)?;
     println!(
@@ -469,12 +503,12 @@ fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
     let mut wallets = Vec::new();
     for path in &cli.wallet {
         let w = Wallet::open(path)?;
-        let der = w.keys.derive();
+        let vk = w.keys.viewing();
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("wallet");
-        wallets.push((name.to_owned(), w.address().to_string(), der));
+        wallets.push((name.to_owned(), w.address().to_string(), vk));
     }
     let mut events = Vec::new();
     let mut vectors = Vec::new();
@@ -485,8 +519,8 @@ fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
                 let leaf = note::mint_leaf(m.value, &env.d, &env.pk_d, &env.r_seed);
                 events.push(json!({"txid": m.txid, "height": m.height, "kind": "mint",
                     "positions": [m.pos], "envelope": hex::encode(&m.bytes), "value": m.value}));
-                for (name, _, der) in &wallets {
-                    if keys::address_for(der, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
+                for (name, _, vk) in &wallets {
+                    if keys::address_for(vk, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
                         vectors.push(
                             json!({"txid": m.txid, "wallet": name, "role": "mint", "j": 0,
                             "v": m.value, "d": hex::encode(env.d), "r_seed": fr_hex(&env.r_seed),
@@ -502,7 +536,7 @@ fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
                     json!({"txid": t.txid, "height": t.height, "kind": "transfer",
                     "positions": t.positions, "envelope": hex::encode(&t.bytes)}),
                 );
-                for (name, _, der) in &wallets {
+                for (name, _, vk) in &wallets {
                     let mut push = |role: &str,
                                     j: usize,
                                     n: &note::NotePlaintext,
@@ -514,13 +548,13 @@ fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
                     };
                     for j in 0..N_OUT {
                         if let Some(n) =
-                            note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &der.sk_view)
+                            note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &vk.sk_view)
                         {
                             push("recipient", j, &n, None);
                         }
                     }
                     let Some(records) =
-                        note::decrypt_recovery(&env.ct_out, &env.recovery_binding(), &der.vk_out)
+                        note::decrypt_recovery(&env.ct_out, &env.recovery_binding(), &vk.vk_out)
                     else {
                         continue;
                     };
@@ -570,9 +604,9 @@ fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
             "proof_len": envelope::PROOF_LEN,
             "const_salt": hex::encode(note::CONST_SALT), "aux_null": fr_hex(&note::aux_null()),
         },
-        "wallets": wallets.iter().map(|(name, addr, der)| json!({
+        "wallets": wallets.iter().map(|(name, addr, vk)| json!({
             "name": name, "address": addr,
-            "vk_in": fr_hex(&der.vk_in), "vk_out": hex::encode(der.vk_out),
+            "vk_in": fr_hex(&vk.vk_in), "vk_out": hex::encode(vk.vk_out),
         })).collect::<Vec<_>>(),
         "state": {
             "activation": st.deployment.activation,
@@ -588,11 +622,14 @@ fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
 }
 
 fn print_addresses(w: &Wallet, network: Network) {
+    let addr = |k: Result<&shielded_probe::chain::FundingKey, _>| {
+        k.map_or("none".to_owned(), |k| k.address(network).to_string())
+    };
     println!(
         "shielded {}\nfunding  {}\nvault    {}",
         w.address(),
-        w.funding.address(network),
-        w.vault().address(network)
+        addr(w.funding_key()),
+        addr(w.vault_key())
     );
 }
 

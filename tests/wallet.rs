@@ -43,7 +43,7 @@ fn fresh_state(op: &Wallet) -> State {
         network: Network::Signet,
         fee_rate_sat_vb: 2,
         activation: 10,
-        vault_script_pubkey: op.vault().script_pubkey(),
+        vault_script_pubkey: op.vault_key().unwrap().script_pubkey(),
         operator_address: op.address().to_string(),
         vk_fingerprint: "test".into(),
     })
@@ -312,7 +312,7 @@ fn scan_records_burned_output_as_spent() {
     let mut st = fresh_state(&op);
     let payout = Payout {
         amount: 1000,
-        script_pubkey: alice.funding.script_pubkey().to_bytes(),
+        script_pubkey: alice.funding_key().unwrap().script_pubkey().to_bytes(),
     };
     transfer(
         &mut st,
@@ -366,32 +366,97 @@ fn create_writes_a_private_wallet_file() {
 }
 
 #[test]
-fn open_fills_a_missing_vault_key() {
+fn open_never_writes_and_migrate_fills_a_missing_vault_key() {
     let p = tmp("old");
     let w = Wallet::create(&p).unwrap();
     let old = format!(
         r#"{{"seed":"{}","funding_sk":"{}","notes":[],"sent":[],"scanned_events":0,"paid_payouts":["{}"]}}"#,
         hex::encode(w.file.seed),
-        hex::encode(w.file.funding_sk),
+        hex::encode(w.file.funding_sk.unwrap()),
         Txid::from_byte_array([4; 32])
     );
     drop(w);
-    std::fs::write(&p, old).unwrap();
-    let a = Wallet::open(&p).unwrap();
-    assert_ne!(a.file.vault_sk, [0u8; 32]);
+    std::fs::write(&p, &old).unwrap();
+    let mut a = Wallet::open(&p).unwrap();
+    assert!(a.file.vault_sk.is_none());
+    assert_eq!(
+        a.vault_key().err().map(|e| e.to_string()),
+        Some("this wallet has no vault key".into())
+    );
+    assert_eq!(std::fs::read_to_string(&p).unwrap(), old, "open wrote");
+    assert!(a.migrate().unwrap());
+    assert!(!a.migrate().unwrap());
     assert_eq!(
         std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    let vault = a.vault().script_pubkey();
-    assert_ne!(vault, a.funding.script_pubkey());
+    let vault = a.vault_key().unwrap().script_pubkey();
+    assert_ne!(vault, a.funding_key().unwrap().script_pubkey());
     drop(a);
     let b = Wallet::open(&p).unwrap();
     assert_eq!(
         vault,
-        b.vault().script_pubkey(),
-        "vault key persisted on first open"
+        b.vault_key().unwrap().script_pubkey(),
+        "vault key persisted by migrate"
     );
+}
+
+#[test]
+fn a_viewing_only_file_scans_but_cannot_fund_and_exports_its_viewing_keys() {
+    let op = Wallet::create(&tmp("op18")).unwrap();
+    let p = tmp("view18");
+    let full = Wallet::create(&p).unwrap();
+    let (seed, addr) = (full.file.seed, full.address());
+    let vk = full.keys.viewing();
+    drop(full);
+    std::fs::write(
+        &p,
+        format!(
+            r#"{{"seed":"{}","notes":[],"sent":[],"scanned_events":0,"paid_payouts":[]}}"#,
+            hex::encode(seed)
+        ),
+    )
+    .unwrap();
+    let mut v = Wallet::open(&p).unwrap();
+    assert_eq!(v.address(), addr);
+    assert_eq!(
+        v.funding_key().err().map(|e| e.to_string()),
+        Some("this wallet has no funding key".into())
+    );
+    let mut st = fresh_state(&op);
+    mint_to(&mut st, &v, 1000, 5, 1);
+    assert_eq!(v.scan(&st).unwrap(), 1);
+    assert_eq!(v.balance(), 1000);
+    let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
+    assert_eq!(
+        v.mint(&mut e, &st.deployment, 1)
+            .err()
+            .map(|e| e.to_string()),
+        Some("this wallet has no funding key".into())
+    );
+    let out = tmp("view18-export");
+    v.export_viewing(&out).unwrap();
+    assert!(v.export_viewing(&out).is_err(), "never overwrites");
+    assert_eq!(
+        std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let text = std::fs::read_to_string(&out).unwrap();
+    let j: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(j["addresses"], json!([addr.to_string()]));
+    assert_eq!(
+        j["vk_in"],
+        json!(hex::encode(shielded_probe::keys::fr_to_bytes(&vk.vk_in)))
+    );
+    assert_eq!(j["vk_out"], json!(hex::encode(vk.vk_out)));
+    assert_eq!(
+        j["sk_view"],
+        json!(hex::encode(shielded_probe::keys::scalar_to_bytes(
+            &vk.sk_view
+        )))
+    );
+    assert!(!text.contains(&hex::encode(seed)));
+    assert_eq!(j.as_object().unwrap().len(), 4);
 }
 
 #[test]
@@ -532,7 +597,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     let mut op = Wallet::create(&tmp("op10")).unwrap();
     let alice = Wallet::create(&tmp("alice10")).unwrap();
     let mut st = fresh_state(&op);
-    let spk = alice.funding.script_pubkey().to_bytes();
+    let spk = alice.funding_key().unwrap().script_pubkey().to_bytes();
     let (o, a) = (op.address(), alice.address());
     transfer(
         &mut st,
@@ -604,7 +669,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
 #[test]
 fn a_stranger_paying_the_vault_with_nf_in_op_return_is_not_a_payout() {
     let op = Wallet::create(&tmp("op11")).unwrap();
-    let vault = op.vault().script_pubkey();
+    let vault = op.vault_key().unwrap().script_pubkey();
     let nf = shielded_probe::keys::fr_to_bytes(&Fr::from(42u64));
     let funded = Transaction {
         version: transaction::Version::TWO,
@@ -713,7 +778,7 @@ fn payouts_only_pays_the_named_request_and_bitcoin_requires_it() {
     let below_dust = || {
         Some(Payout {
             amount: 100,
-            script_pubkey: alice.funding.script_pubkey().to_bytes(),
+            script_pubkey: alice.funding_key().unwrap().script_pubkey().to_bytes(),
         })
     };
     let first = transfer(
@@ -857,7 +922,7 @@ fn built_transfer_is_accepted_by_replay_and_scanned_by_both_wallets() {
     close_block(&mut st, 14);
     let payout = Payout {
         amount: 600,
-        script_pubkey: alice.funding.script_pubkey().to_bytes(),
+        script_pubkey: alice.funding_key().unwrap().script_pubkey().to_bytes(),
     };
     let redeem = bob
         .build_transfer(&st, params(), &op.address(), 600, Some(payout))
@@ -972,8 +1037,8 @@ fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
     let mut op = Wallet::create(&tmp("op17")).unwrap();
     let alice = Wallet::create(&tmp("alice17")).unwrap();
     let mut st = fresh_state(&op);
-    let vault = op.vault().script_pubkey();
-    let spk = alice.funding.script_pubkey();
+    let vault = op.vault_key().unwrap().script_pubkey();
+    let spk = alice.funding_key().unwrap().script_pubkey();
     let req = transfer(
         &mut st,
         [(&op.address(), 10_000, 1), (&alice.address(), 1, 2)],

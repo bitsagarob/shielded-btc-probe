@@ -15,7 +15,7 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::{fmt, str::FromStr};
+use std::{fmt, ops::Deref, str::FromStr};
 
 pub const DIVERSIFIER_LEN: usize = 11;
 /// Scalars derived in-circuit are truncated to this many bits so they are
@@ -179,17 +179,30 @@ pub struct WalletKeys {
     pub seed: [u8; 32],
 }
 
+/// What a scanner needs: detect incoming notes and recover outgoing ones.
+/// Cannot spend.
+#[derive(Clone)]
+pub struct ViewingKeys {
+    pub vk_in: Fr,
+    pub vk_out: [u8; 32],
+    pub sk_view: Fs,
+}
+
 /// Derived material. Everything here is recomputable from the seed.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SpendingKeys {
-    pub sk_master: [u8; 32],
     /// Spend authorisation scalar (Table 1). Its canonical bytes feed sk_nf
     /// and vk_in; it never multiplies a point.
     pub sk_spend: Fs,
     pub sk_nf: Fr,
-    pub vk_in: Fr,
-    pub sk_view: Fs,
-    pub vk_out: [u8; 32],
+    pub viewing: ViewingKeys,
+}
+
+impl Deref for SpendingKeys {
+    type Target = ViewingKeys;
+    fn deref(&self) -> &ViewingKeys {
+        &self.viewing
+    }
 }
 
 impl WalletKeys {
@@ -197,30 +210,43 @@ impl WalletKeys {
         Self { seed }
     }
 
+    fn sk_master(&self) -> [u8; 32] {
+        hkdf(&self.seed, b"sbp/master")
+    }
+
     pub fn derive(&self) -> SpendingKeys {
-        let sk_master = hkdf(&self.seed, b"sbp/master");
+        let sk_master = self.sk_master();
         let sk_spend = scalar_from_bytes(&hkdf(&sk_master, b"sbp/spend"));
         let vk_out = hkdf(&sk_master, b"sbp/out");
         let sk_nf = derive_sk_nf(&sk_spend);
         let vk_in = derive_vk_in(&sk_spend);
         let sk_view = derive_sk_view(&vk_in);
         SpendingKeys {
-            sk_master,
             sk_spend,
             sk_nf,
-            vk_in,
-            sk_view,
-            vk_out,
+            viewing: ViewingKeys {
+                vk_in,
+                vk_out,
+                sk_view,
+            },
         }
+    }
+
+    pub fn viewing(&self) -> ViewingKeys {
+        self.derive().viewing
+    }
+
+    /// Diversifier of a receive path index.
+    pub fn diversifier(&self, index: u32) -> [u8; DIVERSIFIER_LEN] {
+        let dk = hkdf(&self.sk_master(), b"sbp/diversifier");
+        let mut d = [0u8; DIVERSIFIER_LEN];
+        d.copy_from_slice(&hkdf(&dk, &index.to_le_bytes())[..DIVERSIFIER_LEN]);
+        d
     }
 
     /// Diversified payment address (d, pk_d) for a receive path index.
     pub fn address(&self, index: u32) -> Address {
-        let dk = hkdf(&self.derive().sk_master, b"sbp/diversifier");
-        let mut d = [0u8; DIVERSIFIER_LEN];
-        let raw = hkdf(&dk, &index.to_le_bytes());
-        d.copy_from_slice(&raw[..DIVERSIFIER_LEN]);
-        address_for(&self.derive(), d)
+        address_for(&self.viewing(), self.diversifier(index))
             .expect("an own diversifier is off-curve with probability 2^-32")
     }
 }
@@ -235,9 +261,9 @@ pub fn derive_sk_view(vk_in: &Fr) -> Fs {
     scalar_from_field(&poseidon::hash(tag::SK_VIEW, &[*vk_in]))
 }
 
-pub fn address_for(der: &SpendingKeys, d: [u8; DIVERSIFIER_LEN]) -> Option<Address> {
+pub fn address_for(vk: &ViewingKeys, d: [u8; DIVERSIFIER_LEN]) -> Option<Address> {
     let g_d = diversify_hash(&d)?.base;
-    let pk_d = (g_d.into_group() * der.sk_view).into_affine();
+    let pk_d = (g_d.into_group() * vk.sk_view).into_affine();
     Some(Address { d, pk_d })
 }
 
