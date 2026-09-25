@@ -1,7 +1,7 @@
 /* Shielded Bitcoin probe: decrypt real envelopes from the Bitsaga Signet in
  * the browser.
  *
- * Companion to the Rust crate shielded-probe, which implements the transfer
+ * Companion to the Rust crate shielded-btc-probe, which implements the transfer
  * layer of "Shielded Bitcoin: Private Transfers on the Bitcoin L1"
  * (Shikhelman, Komarov, Moskvin, 24 September 2026) with the profile in its
  * PROFILE.md. This file redoes the read side of that profile: parse the

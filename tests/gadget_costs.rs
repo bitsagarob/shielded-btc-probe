@@ -12,7 +12,7 @@ use ark_r1cs_std::{
     alloc::AllocVar, convert::ToBytesGadget, fields::fp::FpVar, prelude::*, uint8::UInt8,
 };
 use ark_relations::r1cs::{ConstraintSystem, ConstraintSystemRef, SynthesisError};
-use shielded_probe::{Fr, N_IN, N_OUT, poseidon};
+use shielded_btc_probe::{Fr, N_IN, N_OUT, poseidon};
 
 type Bytes = Vec<UInt8<Fr>>;
 
@@ -51,7 +51,7 @@ fn hkdf(ikm: &[UInt8<Fr>], info: &[u8]) -> Result<Bytes, SynthesisError> {
 
 fn baseline() -> usize {
     let cs = ConstraintSystem::<Fr>::new_ref();
-    shielded_probe::circuit::TransferCircuit {
+    shielded_btc_probe::circuit::TransferCircuit {
         public: None,
         witness: None,
     }
@@ -62,7 +62,7 @@ fn baseline() -> usize {
 trait CountOnly {
     fn generate_constraints_for_count(self, cs: ConstraintSystemRef<Fr>);
 }
-impl CountOnly for shielded_probe::circuit::TransferCircuit {
+impl CountOnly for shielded_btc_probe::circuit::TransferCircuit {
     fn generate_constraints_for_count(self, cs: ConstraintSystemRef<Fr>) {
         use ark_relations::r1cs::{ConstraintSynthesizer, SynthesisMode};
         cs.set_mode(SynthesisMode::Setup);

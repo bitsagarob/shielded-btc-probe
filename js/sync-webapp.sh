@@ -10,7 +10,7 @@ commit=$(git -C "$here" rev-parse --short HEAD)
 [ -z "$(git -C "$here" status --porcelain -- .)" ] || { echo "js/ has uncommitted changes; commit first" >&2; exit 1; }
 
 {
-  echo "/* Generated from shielded-probe commit $commit (js/shielded-verify.js). Do not edit here. */"
+  echo "/* Generated from shielded-btc-probe commit $commit (js/shielded-verify.js). Do not edit here. */"
   cat "$here/shielded-verify.js"
 } > "$webapp/shielded-verify.js"
 cp "$here/vectors-signet.json" "$webapp/shielded-data.json"

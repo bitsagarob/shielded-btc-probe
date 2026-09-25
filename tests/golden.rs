@@ -4,7 +4,7 @@
 
 use ark_ff::PrimeField;
 use serde_json::{Value, json};
-use shielded_probe::{
+use shielded_btc_probe::{
     Fr, Fs,
     envelope::{CT_OUT_LEN, Envelope, MintEnvelope, PROOF_LEN, Payout, TransferEnvelope},
     keys::{self, WalletKeys},
@@ -18,7 +18,7 @@ const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden-vectors.js
 fn fr(x: &Fr) -> String {
     hex::encode(keys::fr_to_bytes(x))
 }
-fn pt(p: &shielded_probe::EdwardsAffine) -> String {
+fn pt(p: &shielded_btc_probe::EdwardsAffine) -> String {
     hex::encode(keys::point_to_bytes(p))
 }
 fn fs(s: &Fs) -> String {

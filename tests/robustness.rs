@@ -7,7 +7,7 @@ use bitcoin::{
     BlockHash, Network, ScriptBuf, Txid, blockdata::constants::genesis_block, hashes::Hash,
 };
 use serde_json::{Value, json};
-use shielded_probe::{
+use shielded_btc_probe::{
     EdwardsAffine, Fr,
     chain::{ChainSource, Electrum, Error as ChainError, FundingKey, MockChain, Utxo},
     envelope::{CT_OUT_LEN, Envelope, Error as EnvError, PROOF_LEN, Payout, TransferEnvelope},

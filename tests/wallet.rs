@@ -6,7 +6,7 @@ use bitcoin::{
     absolute, hashes::Hash, script::PushBytesBuf, transaction,
 };
 use serde_json::{Value, json};
-use shielded_probe::{
+use shielded_btc_probe::{
     Fr, K_WALLET, WINDOW_W,
     chain::{ChainSource, FundingKey, MockChain, op_return_payload},
     envelope::{CT_OUT_LEN, Envelope, PROOF_LEN, Payout, TransferEnvelope, recovery_binding},
@@ -49,7 +49,7 @@ fn fresh_state(op: &Wallet) -> State {
 fn mint_to(st: &mut State, w: &Wallet, v: u64, seed: u64, txid_byte: u8) -> u64 {
     let a = w.address();
     let r_seed = Fr::from(seed);
-    let env = shielded_probe::envelope::MintEnvelope {
+    let env = shielded_btc_probe::envelope::MintEnvelope {
         d: a.d,
         pk_d: a.pk_d,
         r_seed,
@@ -199,7 +199,7 @@ fn scan_checks_mint_leaves_and_dedupes_by_position() {
     }));
     assert!(matches!(
         alice.scan(&st),
-        Err(shielded_probe::wallet::Error::LeafMismatch(p)) if p == pos
+        Err(shielded_btc_probe::wallet::Error::LeafMismatch(p)) if p == pos
     ));
     st.events.pop();
     // A position outside the tree.
@@ -210,7 +210,7 @@ fn scan_checks_mint_leaves_and_dedupes_by_position() {
     }));
     assert!(matches!(
         alice.scan(&st),
-        Err(shielded_probe::wallet::Error::LeafMismatch(77))
+        Err(shielded_btc_probe::wallet::Error::LeafMismatch(77))
     ));
 }
 
@@ -484,12 +484,14 @@ fn a_viewing_only_file_scans_but_cannot_fund_and_exports_its_viewing_keys() {
     assert_eq!(j["addresses"], json!([addr.to_string()]));
     assert_eq!(
         j["vk_in"],
-        json!(hex::encode(shielded_probe::keys::fr_to_bytes(&vk.vk_in)))
+        json!(hex::encode(shielded_btc_probe::keys::fr_to_bytes(
+            &vk.vk_in
+        )))
     );
     assert_eq!(j["vk_out"], json!(hex::encode(vk.vk_out)));
     assert_eq!(
         j["sk_view"],
-        json!(hex::encode(shielded_probe::keys::scalar_to_bytes(
+        json!(hex::encode(shielded_btc_probe::keys::scalar_to_bytes(
             &vk.sk_view
         )))
     );
@@ -508,7 +510,7 @@ fn a_second_open_of_the_same_wallet_is_refused_while_the_first_lives() {
     assert!(
         Wallet::create(&p)
             .err()
-            .is_some_and(|e| matches!(e, shielded_probe::wallet::Error::Exists(_)))
+            .is_some_and(|e| matches!(e, shielded_btc_probe::wallet::Error::Exists(_)))
     );
     w.save().unwrap();
     assert!(Wallet::open(&p).is_err(), "the lock survives a save");
@@ -688,7 +690,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     let mut e = MockChain::new(100);
     let done = op.process_payouts(&mut e, &st, None).unwrap();
     assert!(done.is_empty());
-    let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
+    let key = |nf: u64| hex::encode(shielded_btc_probe::keys::fr_to_bytes(&Fr::from(nf)));
     assert!(op.file.failed_payouts[&key(1)].contains("below dust"));
     assert!(op.file.failed_payouts[&key(3)].contains("non-standard"));
     // The vault owns nothing: insufficient funds is transient, so the request
@@ -708,7 +710,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
 fn a_stranger_paying_the_vault_with_nf_in_op_return_is_not_a_payout() {
     let op = Wallet::create(&tmp("op11")).unwrap();
     let vault = op.vault_key().unwrap().script_pubkey();
-    let nf = shielded_probe::keys::fr_to_bytes(&Fr::from(42u64));
+    let nf = shielded_btc_probe::keys::fr_to_bytes(&Fr::from(42u64));
     let funded = Transaction {
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
@@ -837,7 +839,7 @@ fn payouts_only_pays_the_named_request_and_bitcoin_requires_it() {
     );
     op.scan(&st).unwrap();
     let mut e = MockChain::new(100);
-    let key = |nf: u64| hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(nf)));
+    let key = |nf: u64| hex::encode(shielded_btc_probe::keys::fr_to_bytes(&Fr::from(nf)));
     // Both requests are refused when reached; only the named one is reached.
     assert!(
         op.process_payouts(&mut e, &st, Some(second))
@@ -919,7 +921,7 @@ fn built_transfer_is_accepted_by_replay_and_scanned_by_both_wallets() {
     let young = alice.build_transfer(&st, params(), &bob.address(), 600, None);
     assert!(matches!(
         young,
-        Err(shielded_probe::wallet::Error::InsufficientBalance { available: 0, .. })
+        Err(shielded_btc_probe::wallet::Error::InsufficientBalance { available: 0, .. })
     ));
     close_block(&mut st, 12);
     let built = alice
@@ -1008,7 +1010,7 @@ fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
     let mut e = MockChain::new(99);
     e.mine(vec![funded]);
     e.drop_next_broadcast_reply = true;
-    let key = hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(1u64)));
+    let key = hex::encode(shielded_btc_probe::keys::fr_to_bytes(&Fr::from(1u64)));
 
     // Run 1: the server relays the payout but the reply is lost.
     let done = op.process_payouts(&mut e, &st, Some(req)).unwrap();
@@ -1052,7 +1054,7 @@ fn zeroize_clears_the_key_bytes_and_keeps_the_records() {
     der.zeroize();
     assert_eq!(der.viewing.vk_out, [0u8; 32]);
     assert_ne!(vk_out, [0u8; 32]);
-    assert_eq!(der.sk_spend, shielded_probe::Fs::from(0u64));
+    assert_eq!(der.sk_spend, shielded_btc_probe::Fs::from(0u64));
 }
 
 #[test]
@@ -1095,7 +1097,7 @@ fn balance_and_note_selection_refuse_to_overflow() {
         alice
             .build_transfer(&st, params(), &op.address(), u64::MAX, None)
             .err(),
-        Some(shielded_probe::wallet::Error::Overflow)
+        Some(shielded_btc_probe::wallet::Error::Overflow)
     ));
     alice.file.notes[1].spent = true;
     assert_eq!(alice.balance().unwrap(), u64::MAX - 1);

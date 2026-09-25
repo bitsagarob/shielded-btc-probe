@@ -1363,7 +1363,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "shielded-probe"
+name = "shielded-btc-probe"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1391,7 +1391,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "shielded-probe",
+ "shielded-btc-probe",
  "thiserror",
  "zeroize",
 ]

@@ -1,11 +1,11 @@
 [package]
-name = "shielded-probe"
+name = "shielded-btc-probe"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Probe implementation of the Shielded Bitcoin transfer layer on Bitcoin and the Bitsaga Signet"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/bitsagarob/shielded-probe"
+repository = "https://github.com/bitsagarob/shielded-btc-probe"
 readme = "README.md"
 keywords = ["bitcoin", "zero-knowledge", "groth16", "privacy", "signet"]
 categories = ["cryptography"]
@@ -47,7 +47,7 @@ test-util = []
 
 [dev-dependencies]
 proptest = "1.11"
-shielded-probe = { path = ".", features = ["test-util"] }
+shielded-btc-probe = { path = ".", features = ["test-util"] }
 
 # Dependencies optimised in debug so `cargo test` without --release stays usable.
 [profile.dev.package."*"]

@@ -109,7 +109,7 @@ impl Electrum {
             writer,
             next_id: 0,
         };
-        e.call("server.version", json!(["shielded-probe", "1.4"]))?;
+        e.call("server.version", json!(["shielded-btc-probe", "1.4"]))?;
         Ok(e)
     }
 

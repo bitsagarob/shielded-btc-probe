@@ -4,7 +4,7 @@ use bitcoin::{
     Amount, Network, ScriptBuf, Transaction, TxOut, Txid, absolute, hashes::Hash,
     script::PushBytesBuf, transaction,
 };
-use shielded_probe::{
+use shielded_btc_probe::{
     Fr,
     envelope::MintEnvelope,
     indexer::{Deployment, State},

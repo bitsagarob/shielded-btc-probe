@@ -9,7 +9,7 @@ use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use bitcoin::Network;
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use shielded_probe::{
+use shielded_btc_probe::{
     DIV_HASH_TRIES, Fr, Fs, N_IN, N_OUT,
     chain::{ChainSource, Electrum, default_electrum},
     circuit::{TransferCircuit, sample::sample_witness},
@@ -281,7 +281,7 @@ fn main() -> Result<()> {
 
 fn bench() -> Result<()> {
     let (w, p) = sample_witness();
-    let cs = ConstraintSystem::<shielded_probe::Fr>::new_ref();
+    let cs = ConstraintSystem::<shielded_btc_probe::Fr>::new_ref();
     TransferCircuit {
         public: Some(p.clone()),
         witness: Some(w.clone()),
@@ -639,7 +639,7 @@ fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
 }
 
 fn print_addresses(w: &Wallet, network: Network) {
-    let addr = |k: Result<&shielded_probe::chain::FundingKey, _>| {
+    let addr = |k: Result<&shielded_btc_probe::chain::FundingKey, _>| {
         k.map_or("none".to_owned(), |k| k.address(network).to_string())
     };
     println!(

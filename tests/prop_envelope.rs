@@ -1,7 +1,7 @@
 //! Property tests for the canonical envelope parser and CompactSize.
 use ark_ff::PrimeField;
 use proptest::prelude::*;
-use shielded_probe::{
+use shielded_btc_probe::{
     EdwardsAffine, Fr, Fs,
     envelope::{CT_OUT_LEN, Envelope, Error, MintEnvelope, PROOF_LEN, Payout, TransferEnvelope},
     keys,

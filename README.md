@@ -1,4 +1,4 @@
-# shielded-probe
+# shielded-btc-probe
 
 An implementation of the transfer layer from [Shielded Bitcoin: Private
 Transfers on the Bitcoin L1](https://www.allocinit.xyz/uploads/shielded-bitcoin.pdf) (Shikhelman,

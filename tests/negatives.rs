@@ -1,7 +1,7 @@
 //! Negative tests for the soundness/robustness checks no existing test pins.
 use ark_ff::Field;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
-use shielded_probe::{
+use shielded_btc_probe::{
     Fr,
     circuit::{TransferCircuit, sample::sample_witness},
     keys::{self, WalletKeys},
@@ -56,7 +56,7 @@ fn prove_and_verify_rejects_wrong_r_anchor() {
     let (w, p) = sample_witness();
     let proof = params.prove(&p, &w).unwrap();
     assert!(params.verify(&p, &proof));
-    let wrong = shielded_probe::circuit::PublicInputs {
+    let wrong = shielded_btc_probe::circuit::PublicInputs {
         r_anchor: p.r_anchor + Fr::ONE,
         ..p
     };

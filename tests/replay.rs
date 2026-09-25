@@ -5,7 +5,7 @@ use bitcoin::{
     Amount, BlockHash, Network, ScriptBuf, Transaction, TxOut, Txid, absolute, hashes::Hash,
     script::PushBytesBuf, transaction,
 };
-use shielded_probe::{
+use shielded_btc_probe::{
     EdwardsAffine, Fr,
     chain::{ChainSource, DEFAULT_ELECTRUM, Electrum, MockChain, op_return_payload},
     envelope::{CT_OUT_LEN, Envelope, MAGIC, MintEnvelope, PROOF_LEN, Payout, TransferEnvelope},
@@ -395,7 +395,7 @@ fn sync_leaves_state_unmutated_when_a_block_changes_while_it_is_fetched() {
     let mut st = State::fresh(dep());
     assert!(matches!(
         st.sync(&mut chain, params()),
-        Err(shielded_probe::indexer::Error::BlockChanged(1000))
+        Err(shielded_btc_probe::indexer::Error::BlockChanged(1000))
     ));
     assert_eq!(st.replayed_height, 999);
     assert_eq!(st.tree.len(), 0);
@@ -421,7 +421,7 @@ fn sync_refuses_a_chain_without_the_activation_hash_instead_of_rebuilding() {
     });
     st.tree.append(Fr::from(1u64));
     match st.sync(&mut chain, params()) {
-        Err(shielded_probe::indexer::Error::WrongChain { expected, got }) => {
+        Err(shielded_btc_probe::indexer::Error::WrongChain { expected, got }) => {
             assert_eq!(expected, BlockHash::all_zeros());
             assert_eq!(got, right);
         }
@@ -486,7 +486,7 @@ fn load_rejects_hostile_state_files_and_a_height_before_activation() {
     .unwrap();
     assert!(matches!(
         State::load(&p),
-        Err(shielded_probe::indexer::Error::HeightBeforeActivation {
+        Err(shielded_btc_probe::indexer::Error::HeightBeforeActivation {
             height: 0,
             activation: 1000
         })
