@@ -454,6 +454,10 @@ impl Wallet {
             match ev {
                 Event::Mint(m) => {
                     let env = m.envelope()?;
+                    let leaf = note::mint_leaf(m.value, &env.d, &env.pk_d, &env.r_seed);
+                    if state.tree.leaf(m.pos) != Some(leaf) {
+                        return Err(Error::LeafMismatch(m.pos));
+                    }
                     if keys::address_for(&der.viewing, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
                         let n = OwnedNote {
                             v: m.value,
@@ -564,14 +568,15 @@ impl Wallet {
         Ok(found)
     }
 
-    /// Adds a scanned note unless it is empty or already recorded.
+    /// Adds a scanned note unless it is empty or already recorded, by
+    /// position or by (source, output index).
     fn record(&mut self, der: &SpendingKeys, nfs: &mut HashSet<Fr>, n: OwnedNote) -> bool {
         if n.v == 0
             || self
                 .file
                 .notes
                 .iter()
-                .any(|o| o.source_txid == n.source_txid && o.j == n.j)
+                .any(|o| o.pos == n.pos || (o.source_txid == n.source_txid && o.j == n.j))
         {
             return false;
         }

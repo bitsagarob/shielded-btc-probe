@@ -175,6 +175,46 @@ fn scan_rescans_when_history_changed() {
 }
 
 #[test]
+fn scan_checks_mint_leaves_and_dedupes_by_position() {
+    let op = Wallet::create(&tmp("op21")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice21")).unwrap();
+    let mut st = fresh_state(&op);
+    let pos = mint_to(&mut st, &alice, 1000, 5, 1);
+    let Event::Mint(first) = st.events[0].clone() else {
+        panic!()
+    };
+    // A second event claiming the same leaf under another txid.
+    st.events.push(Event::Mint(AcceptedMint {
+        txid: Txid::from_byte_array([2; 32]),
+        ..first.clone()
+    }));
+    assert_eq!(alice.scan(&st).unwrap(), 1);
+    assert_eq!(alice.file.notes.len(), 1);
+    assert_eq!(alice.balance().unwrap(), 1000);
+    // A value the leaf does not hold.
+    st.events.push(Event::Mint(AcceptedMint {
+        txid: Txid::from_byte_array([3; 32]),
+        value: 1_000_000_000,
+        ..first.clone()
+    }));
+    assert!(matches!(
+        alice.scan(&st),
+        Err(shielded_probe::wallet::Error::LeafMismatch(p)) if p == pos
+    ));
+    st.events.pop();
+    // A position outside the tree.
+    st.events.push(Event::Mint(AcceptedMint {
+        txid: Txid::from_byte_array([4; 32]),
+        pos: 77,
+        ..first
+    }));
+    assert!(matches!(
+        alice.scan(&st),
+        Err(shielded_probe::wallet::Error::LeafMismatch(77))
+    ));
+}
+
+#[test]
 fn scan_drops_and_rediscovers_a_stale_note() {
     let op = Wallet::create(&tmp("op9")).unwrap();
     let mut alice = Wallet::create(&tmp("alice9")).unwrap();
