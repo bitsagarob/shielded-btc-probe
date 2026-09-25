@@ -44,6 +44,8 @@ pub enum Error {
     UnknownKind(u8),
     #[error("trailing bytes after envelope")]
     TrailingBytes,
+    #[error("non-minimal CompactSize")]
+    NonMinimalCount,
     #[error("non-canonical envelope encoding")]
     NonCanonical,
     #[error("envelope truncated")]
@@ -86,14 +88,29 @@ fn header(kind: u8) -> [u8; 6] {
     [MAGIC[0], MAGIC[1], MAGIC[2], VERSION, kind, 0]
 }
 
+/// Bitcoin CompactSize (A.5): one byte below 253, else 0xfd + u16 LE, 0xfe + u32 LE.
+fn push_compact_size(v: &mut Vec<u8>, n: usize) {
+    match n {
+        0..=252 => v.push(n as u8),
+        253..=0xffff => {
+            v.push(0xfd);
+            v.extend_from_slice(&(n as u16).to_le_bytes());
+        }
+        _ => {
+            v.push(0xfe);
+            v.extend_from_slice(&(n as u32).to_le_bytes());
+        }
+    }
+}
+
 impl TransferEnvelope {
     /// Canonical body: everything except the proof.
     pub fn body_bytes(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(700);
         v.extend_from_slice(&header(KIND_TRANSFER));
         v.extend_from_slice(&self.h_anchor.to_le_bytes());
-        v.push(N_IN as u8);
-        v.push(N_OUT as u8);
+        push_compact_size(&mut v, N_IN);
+        push_compact_size(&mut v, N_OUT);
         for nf in &self.nf {
             v.extend_from_slice(&keys::fr_to_bytes(nf));
         }
@@ -107,9 +124,7 @@ impl TransferEnvelope {
         match &self.payout {
             None => v.push(0),
             Some(p) => {
-                let len = 8 + p.script_pubkey.len();
-                assert!(len < 256, "payout too long");
-                v.push(len as u8);
+                push_compact_size(&mut v, 8 + p.script_pubkey.len());
                 v.extend_from_slice(&p.amount.to_le_bytes());
                 v.extend_from_slice(&p.script_pubkey);
             }
@@ -204,10 +219,10 @@ impl Envelope {
         let env = match b[4] {
             KIND_TRANSFER => {
                 let h_anchor = u32::from_le_bytes(r.take(4)?.try_into().unwrap());
-                if r.take(1)?[0] as usize != N_IN {
+                if r.compact_size()? != N_IN {
                     return Err(Error::InputCount);
                 }
-                if r.take(1)?[0] as usize != N_OUT {
+                if r.compact_size()? != N_OUT {
                     return Err(Error::OutputCount);
                 }
                 let mut nf = [Fr::from(0u64); N_IN];
@@ -228,7 +243,7 @@ impl Envelope {
                         Ciphertext::from_bytes(r.take(CIPHERTEXT_LEN)?).ok_or(Error::Ciphertext)?;
                 }
                 let ct_out = r.take(CT_OUT_LEN)?.to_vec();
-                let plen = r.take(1)?[0] as usize;
+                let plen = r.compact_size()?;
                 let payout = if plen == 0 {
                     None
                 } else {
@@ -285,6 +300,26 @@ impl<'a> Reader<'a> {
         self.pos += n;
         Ok(s)
     }
+
+    /// Minimal CompactSize; 0xff (u64) never occurs in an envelope.
+    fn compact_size(&mut self) -> Result<usize, Error> {
+        let (n, min) = match self.take(1)?[0] {
+            0xff => return Err(Error::NonMinimalCount),
+            0xfe => (
+                u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize,
+                0x1_0000,
+            ),
+            0xfd => (
+                u16::from_le_bytes(self.take(2)?.try_into().unwrap()) as usize,
+                253,
+            ),
+            b => (b as usize, 0),
+        };
+        if n < min {
+            return Err(Error::NonMinimalCount);
+        }
+        Ok(n)
+    }
 }
 
 #[cfg(test)]
@@ -327,5 +362,10 @@ mod tests {
         bad.push(0);
         assert!(Envelope::parse(&bad).is_err());
         assert_eq!(Envelope::parse(b"hello").unwrap(), None);
+        // input_count as 0xfd 02 00 decodes to 2 but is not minimal.
+        let mut wide = bytes[..10].to_vec();
+        wide.extend_from_slice(&[0xfd, 2, 0]);
+        wide.extend_from_slice(&bytes[11..]);
+        assert_eq!(Envelope::parse(&wide), Err(Error::NonMinimalCount));
     }
 }
