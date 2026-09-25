@@ -271,9 +271,9 @@ impl FundingKey {
             value: Amount::ZERO,
             script_pubkey: ScriptBuf::new_op_return(PushBytesBuf::try_from(payload.to_vec())?),
         };
-        // Two passes: size with a zero fee, then re-sign with the real fee.
+        // Size with a zero fee, then re-sign until the fee covers the size; more inputs can raise it again.
         let mut fee = 0u64;
-        for _ in 0..2 {
+        for _ in 0..6 {
             let mut selected = Vec::new();
             let mut total = 0u64;
             for u in utxos {
