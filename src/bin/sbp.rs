@@ -17,7 +17,7 @@ use shielded_probe::{
     note::{self, CIPHERTEXT_LEN},
     poseidon::{self, tag},
     prover::Params,
-    wallet::Wallet,
+    wallet::{Wallet, check_deposit},
 };
 use std::{
     path::{Path, PathBuf},
@@ -84,6 +84,9 @@ enum Cmd {
     Mint {
         #[arg(long)]
         amount: u64,
+        /// Allow a deposit over the cap on bitcoin.
+        #[arg(long)]
+        i_know: bool,
     },
     /// Scan replayed history for notes owned by this wallet.
     Scan,
@@ -217,7 +220,7 @@ fn main() -> Result<()> {
         Cmd::Address { network } => address(&cli, *network),
         Cmd::Sync => sync(&cli),
         Cmd::Status => status(&cli),
-        Cmd::Mint { amount } => mint(&cli, *amount),
+        Cmd::Mint { amount, i_know } => mint(&cli, *amount, *i_know),
         Cmd::Scan => scan(&cli),
         Cmd::Unlock { txid, force } => unlock(&cli, txid, *force),
         Cmd::Send { to, amount } => send(&cli, to, *amount),
@@ -323,10 +326,12 @@ fn status(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn mint(cli: &Cli, amount: u64) -> Result<()> {
+fn mint(cli: &Cli, amount: u64, i_know: bool) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
     let st = load_state(&cli.state)?;
+    check_deposit(st.deployment.network, amount, i_know)?;
     let mut e = connect(cli, st.deployment.network)?;
+
     let (txid, bytes, vsize, fee) = w.mint(&mut e, &st.deployment, amount)?;
     println!(
         "mint txid {txid}\nenvelope {bytes} bytes, carrier {vsize} vB, fee {fee} sat, paid {amount} sat to the vault"

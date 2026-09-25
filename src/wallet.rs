@@ -88,6 +88,18 @@ pub enum Error {
     PayoutsUnsupervised,
     #[error("no accepted payout request in {0}")]
     NoSuchRequest(Txid),
+    #[error("{0} sat is over the {DEPOSIT_CAP} sat deposit cap, pass --i-know to mint anyway")]
+    DepositCapped(u64),
+}
+
+/// Deposits above this on bitcoin need an explicit override.
+pub const DEPOSIT_CAP: u64 = 100_000;
+
+pub fn check_deposit(network: Network, amount: u64, overridden: bool) -> Result<(), Error> {
+    if network == Network::Bitcoin && amount > DEPOSIT_CAP && !overridden {
+        return Err(Error::DepositCapped(amount));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
