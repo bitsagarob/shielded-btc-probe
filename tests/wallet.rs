@@ -3,8 +3,9 @@
 
 use bitcoin::{
     Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
-    absolute, hashes::Hash, script::PushBytesBuf, transaction,
+    absolute, consensus, hashes::Hash, script::PushBytesBuf, transaction,
 };
+use serde_json::{Value, json};
 use shielded_probe::{
     Fr, K_WALLET, WINDOW_W,
     chain::{DEFAULT_ELECTRUM, Electrum, FundingKey, op_return_payload},
@@ -15,15 +16,24 @@ use shielded_probe::{
     prover::Params,
     wallet::{DEPOSIT_CAP, Wallet, check_deposit, spends_vault, validate_payout},
 };
-use std::{os::unix::fs::PermissionsExt, sync::OnceLock};
+use std::{
+    io::{BufRead, BufReader, Write},
+    net::TcpListener,
+    os::unix::fs::PermissionsExt,
+    sync::{Arc, Mutex, OnceLock},
+};
 
 fn params() -> &'static Params {
     static P: OnceLock<Params> = OnceLock::new();
     P.get_or_init(|| Params::setup_insecure().unwrap())
 }
 
+fn tmp_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("sbp-wallet-{name}-{}.json", std::process::id()))
+}
+
 fn tmp(name: &str) -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("sbp-wallet-{name}-{}.json", std::process::id()));
+    let p = tmp_path(name);
     let _ = std::fs::remove_file(&p);
     p
 }
@@ -829,4 +839,161 @@ fn built_transfer_is_accepted_by_replay_and_scanned_by_both_wallets() {
     )
     .unwrap();
     assert_eq!(st.tree.len(), 5);
+}
+
+/// An Electrum server over one vault: a confirmed funding transaction plus
+/// everything broadcast to it, which it relays even when the reply is lost.
+struct FakeElectrum {
+    vault: ScriptBuf,
+    known: Vec<Transaction>,
+    broadcasts: Vec<Transaction>,
+    fail_first: bool,
+}
+
+impl FakeElectrum {
+    fn utxos(&self) -> Vec<Value> {
+        let mut out = vec![];
+        for (i, tx) in self.known.iter().enumerate() {
+            let id = tx.compute_txid();
+            for (vout, o) in tx.output.iter().enumerate() {
+                let spent = self.known.iter().any(|t| {
+                    t.input.iter().any(|i| {
+                        i.previous_output.txid == id && i.previous_output.vout == vout as u32
+                    })
+                });
+                if o.script_pubkey == self.vault && !spent {
+                    out.push(json!({"tx_hash": id.to_string(), "tx_pos": vout,
+                        "value": o.value.to_sat(), "height": if i == 0 { 100 } else { 0 }}));
+                }
+            }
+        }
+        out
+    }
+
+    fn handle(&mut self, method: &str, params: &Value) -> Result<Value, Value> {
+        match method {
+            "server.version" => Ok(json!(["fake", "1.4"])),
+            "blockchain.scripthash.get_history" => Ok(Value::Array(
+                self.known
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        json!({"tx_hash": t.compute_txid().to_string(),
+                            "height": if i == 0 { 100 } else { 0 }})
+                    })
+                    .collect(),
+            )),
+            "blockchain.scripthash.listunspent" => Ok(Value::Array(self.utxos())),
+            "blockchain.transaction.get" => {
+                let id: Txid = params[0].as_str().unwrap().parse().unwrap();
+                let t = self
+                    .known
+                    .iter()
+                    .find(|t| t.compute_txid() == id)
+                    .expect("known tx");
+                Ok(json!(hex::encode(consensus::serialize(t))))
+            }
+            "blockchain.transaction.broadcast" => {
+                let tx: Transaction =
+                    consensus::deserialize(&hex::decode(params[0].as_str().unwrap()).unwrap())
+                        .unwrap();
+                self.broadcasts.push(tx.clone());
+                self.known.push(tx.clone());
+                if self.fail_first {
+                    self.fail_first = false;
+                    return Err(json!({"code": -1, "message": "timeout"}));
+                }
+                Ok(json!(tx.compute_txid().to_string()))
+            }
+            m => panic!("unexpected method {m}"),
+        }
+    }
+}
+
+fn serve(fake: Arc<Mutex<FakeElectrum>>) -> String {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let (s, _) = l.accept().unwrap();
+        let mut w = s.try_clone().unwrap();
+        for line in BufReader::new(s).lines() {
+            let Ok(line) = line else { break };
+            let req: Value = serde_json::from_str(&line).unwrap();
+            let id = req["id"].clone();
+            let reply = match fake
+                .lock()
+                .unwrap()
+                .handle(req["method"].as_str().unwrap(), &req["params"])
+            {
+                Ok(r) => json!({"id": id, "result": r}),
+                Err(e) => json!({"id": id, "error": e}),
+            };
+            w.write_all(format!("{reply}\n").as_bytes()).unwrap();
+        }
+    });
+    addr
+}
+
+#[test]
+fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
+    let mut op = Wallet::create(&tmp("op17")).unwrap();
+    let alice = Wallet::create(&tmp("alice17")).unwrap();
+    let mut st = fresh_state(&op);
+    let vault = op.vault().script_pubkey();
+    let spk = alice.funding.script_pubkey();
+    let req = transfer(
+        &mut st,
+        [(&op.address(), 10_000, 1), (&alice.address(), 1, 2)],
+        None,
+        [Fr::from(1u64), Fr::from(2u64)],
+        Some(Payout {
+            amount: 10_000,
+            script_pubkey: spk.to_bytes(),
+        }),
+        7,
+    );
+    op.scan(&st).unwrap();
+    let funded = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: vault.clone(),
+        }],
+    };
+    let fake = Arc::new(Mutex::new(FakeElectrum {
+        vault,
+        known: vec![funded],
+        broadcasts: vec![],
+        fail_first: true,
+    }));
+    let mut e = Electrum::connect(&serve(fake.clone())).unwrap();
+    let key = hex::encode(shielded_probe::keys::fr_to_bytes(&Fr::from(1u64)));
+
+    // Run 1: the server relays the payout but the reply is lost.
+    let done = op.process_payouts(&mut e, &st, Some(req)).unwrap();
+    assert!(done.is_empty());
+    let first = fake.lock().unwrap().broadcasts[0].compute_txid();
+    assert_eq!(op.file.paid_payouts, vec![key.clone()]);
+    assert_eq!(op.file.payout_txids, vec![first]);
+    assert_eq!(
+        fake.lock().unwrap().broadcasts[0].output[0].script_pubkey,
+        spk
+    );
+
+    // Run 2: the payout sits in the mempool with its change back to the vault.
+    let done = op.process_payouts(&mut e, &st, Some(req)).unwrap();
+    assert!(done.is_empty());
+    assert_eq!(fake.lock().unwrap().broadcasts.len(), 1);
+    drop(op);
+    let mut again = Wallet::open(&tmp_path("op17")).unwrap();
+    assert_eq!(again.file.paid_payouts, vec![key]);
+    assert!(
+        again
+            .process_payouts(&mut e, &st, Some(req))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(fake.lock().unwrap().broadcasts.len(), 1);
 }

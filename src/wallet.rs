@@ -780,20 +780,19 @@ impl Wallet {
                     continue;
                 }
             };
-            // Intent on disk before the network sees the transaction.
-            self.file.paid_payouts.push(key.clone());
+            // Intent and txid on disk before the network sees the transaction.
+            // A broadcast error is ambiguous (the server may have relayed it),
+            // so both stay; the next run's history check tells.
+            let paid = tx.compute_txid();
+            self.file.paid_payouts.push(key);
+            self.file.payout_txids.push(paid);
             self.save()?;
             match client.broadcast(&tx) {
-                Ok(paid) => {
-                    self.file.payout_txids.push(paid);
-                    self.save()?;
-                    done.push((t.txid, tx.output[0].value.to_sat(), fee, paid));
-                }
-                Err(err) => {
-                    self.file.paid_payouts.retain(|k| k != &key);
-                    self.save()?;
-                    log::warn!("payout in {} deferred: {err}", t.txid);
-                }
+                Ok(_) => done.push((t.txid, tx.output[0].value.to_sat(), fee, paid)),
+                Err(err) => log::warn!(
+                    "payout in {} broadcast as {paid} returned an error, kept as paid: {err}",
+                    t.txid
+                ),
             }
         }
         if let Some(o) = only.filter(|_| !seen) {
