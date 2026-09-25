@@ -7,7 +7,7 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 webapp=${1:-"$HOME/apps/bitsaga/webapp"}
 commit=$(git -C "$here" rev-parse --short HEAD)
-[ -z "$(git -C "$here" status --porcelain -- js/)" ] || { echo "js/ has uncommitted changes; commit first" >&2; exit 1; }
+[ -z "$(git -C "$here" status --porcelain -- .)" ] || { echo "js/ has uncommitted changes; commit first" >&2; exit 1; }
 
 {
   echo "/* Generated from shielded-probe commit $commit (js/shielded-verify.js). Do not edit here. */"
