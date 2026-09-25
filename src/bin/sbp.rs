@@ -129,7 +129,11 @@ enum Cmd {
     },
     /// Print the JSON the browser verifier needs: constants, viewing keys of
     /// the given wallets, accepted events and decryption test vectors.
-    ExportJs,
+    ExportJs {
+        /// Written as network_label so the page can tell two exports apart.
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 impl Cli {
@@ -227,7 +231,7 @@ fn main() -> Result<()> {
         Cmd::Redeem { amount, to } => redeem(&cli, *amount, to),
         Cmd::PublishRaw { hex } => publish_raw(&cli, hex),
         Cmd::Payouts { only } => payouts(&cli, only.as_deref()),
-        Cmd::ExportJs => export_js(&cli),
+        Cmd::ExportJs { label } => export_js(&cli, label.as_deref()),
     }
 }
 
@@ -456,7 +460,7 @@ fn payouts(cli: &Cli, only: Option<&str>) -> Result<()> {
 }
 
 /// Everything shielded-verify.js needs, and no secret: viewing keys only.
-fn export_js(cli: &Cli) -> Result<()> {
+fn export_js(cli: &Cli, label: Option<&str>) -> Result<()> {
     let dec = |x: &Fr| x.to_string();
     let fr_hex = |x: &Fr| hex::encode(keys::fr_to_bytes(x));
     let cfg = poseidon::config();
@@ -537,6 +541,7 @@ fn export_js(cli: &Cli) -> Result<()> {
         }
     }
     let out = json!({
+        "network_label": label,
         "fr_modulus": Fr::MODULUS.to_string(),
         "poseidon": {
             "full_rounds": cfg.full_rounds, "partial_rounds": cfg.partial_rounds,
