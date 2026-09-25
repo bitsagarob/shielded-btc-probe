@@ -1,14 +1,20 @@
 //! sbp: the Shielded Bitcoin probe CLI.
 
 use anyhow::{Context, Result, ensure};
+use ark_ec::twisted_edwards::TECurveConfig;
+use ark_ff::PrimeField;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystem};
 use clap::{Parser, Subcommand};
+use serde_json::json;
 use shielded_probe::{
+    DIV_HASH_TRIES, Fr, Fs, N_IN, N_OUT,
     chain::{DEFAULT_ELECTRUM, Electrum},
     circuit::{TransferCircuit, sample::sample_witness},
-    envelope::Payout,
+    envelope::{self, Payout},
     indexer::{Deployment, Event, State},
-    keys::Address,
+    keys::{self, Address, DIVERSIFIER_LEN, SCALAR_BITS},
+    note::{self, CIPHERTEXT_LEN},
+    poseidon::{self, tag},
     prover::Params,
     wallet::Wallet,
 };
@@ -27,13 +33,14 @@ struct Cli {
     #[arg(long, default_value = "params")]
     params: PathBuf,
     /// Indexer state directory (deployment.json and state.json).
-    #[arg(long, default_value = "state")]
+    #[arg(long, global = true, default_value = "state")]
     state: PathBuf,
     #[arg(long, default_value = DEFAULT_ELECTRUM)]
     electrum: String,
-    /// Wallet file, required by every wallet subcommand.
+    /// Wallet file, required by every wallet subcommand. Repeatable for
+    /// export-js only.
     #[arg(long, global = true)]
-    wallet: Option<PathBuf>,
+    wallet: Vec<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -97,11 +104,18 @@ enum Cmd {
         #[arg(long)]
         hex: String,
     },
+    /// Print the JSON the browser verifier needs: constants, viewing keys of
+    /// the given wallets, accepted events and decryption test vectors.
+    ExportJs,
 }
 
 impl Cli {
     fn wallet(&self) -> Result<&Path> {
-        self.wallet.as_deref().context("--wallet is required")
+        ensure!(self.wallet.len() < 2, "--wallet given more than once");
+        self.wallet
+            .first()
+            .map(PathBuf::as_path)
+            .context("--wallet is required")
     }
 }
 
@@ -156,6 +170,7 @@ fn main() -> Result<()> {
         Cmd::Redeem { amount, to } => redeem(&cli, *amount, to),
         Cmd::PublishRaw { hex } => publish_raw(&cli, hex),
         Cmd::Payouts => payouts(&cli),
+        Cmd::ExportJs => export_js(&cli),
     }
 }
 
@@ -352,6 +367,132 @@ fn payouts(cli: &Cli) -> Result<()> {
     if done.is_empty() {
         println!("nothing to pay");
     }
+    Ok(())
+}
+
+/// Everything shielded-verify.js needs, and no secret: viewing keys only.
+fn export_js(cli: &Cli) -> Result<()> {
+    let dec = |x: &Fr| x.to_string();
+    let fr_hex = |x: &Fr| hex::encode(keys::fr_to_bytes(x));
+    let cfg = poseidon::config();
+    let st = load_state(&cli.state)?;
+    ensure!(!cli.wallet.is_empty(), "--wallet is required");
+    let mut wallets = Vec::new();
+    for path in &cli.wallet {
+        let w = Wallet::open(path)?;
+        let der = w.keys.derive();
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wallet");
+        wallets.push((name.to_owned(), w.address().to_string(), der));
+    }
+    let mut events = Vec::new();
+    let mut vectors = Vec::new();
+    for ev in &st.events {
+        match ev {
+            Event::Mint(m) => {
+                let env = m.envelope()?;
+                let leaf = note::mint_leaf(m.value, &env.d, &env.pk_d, &env.r_seed);
+                events.push(json!({"txid": m.txid, "height": m.height, "kind": "mint",
+                    "positions": [m.pos], "envelope": hex::encode(&m.bytes), "value": m.value}));
+                for (name, _, der) in &wallets {
+                    if keys::address_for(der, env.d).is_some_and(|a| a.pk_d == env.pk_d) {
+                        vectors.push(
+                            json!({"txid": m.txid, "wallet": name, "role": "mint", "j": 0,
+                            "v": m.value, "d": hex::encode(env.d), "r_seed": fr_hex(&env.r_seed),
+                            "leaf": fr_hex(&leaf)}),
+                        );
+                    }
+                }
+            }
+            Event::Transfer(t) => {
+                let env = t.envelope()?;
+                let h_body = env.h_body();
+                events.push(
+                    json!({"txid": t.txid, "height": t.height, "kind": "transfer",
+                    "positions": t.positions, "envelope": hex::encode(&t.bytes)}),
+                );
+                for (name, _, der) in &wallets {
+                    let mut push = |role: &str,
+                                    j: usize,
+                                    n: &note::NotePlaintext,
+                                    to: Option<String>| {
+                        let leaf = note::leaf(&h_body, j as u8, &env.pk_eph[j], &env.ct[j]);
+                        vectors.push(json!({"txid": t.txid, "wallet": name, "role": role, "j": j,
+                            "v": n.v, "d": hex::encode(n.d), "r_seed": fr_hex(&n.r_seed),
+                            "leaf": fr_hex(&leaf), "to": to}));
+                    };
+                    for j in 0..N_OUT {
+                        if let Some(n) =
+                            note::decrypt_as_recipient(&env.ct[j], &env.pk_eph[j], &der.sk_view)
+                        {
+                            push("recipient", j, &n, None);
+                        }
+                    }
+                    let Some(records) =
+                        note::decrypt_recovery(&env.ct_out, &env.recovery_binding(), &der.vk_out)
+                    else {
+                        continue;
+                    };
+                    for (j, (pk_d, s)) in records.iter().take(N_OUT).enumerate() {
+                        if let Some(n) =
+                            note::decrypt_as_sender(&env.ct[j], &env.pk_eph[j], pk_d, s)
+                        {
+                            let to = Address {
+                                d: n.d,
+                                pk_d: *pk_d,
+                            }
+                            .to_string();
+                            push("sender", j, &n, Some(to));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let out = json!({
+        "fr_modulus": Fr::MODULUS.to_string(),
+        "poseidon": {
+            "full_rounds": cfg.full_rounds, "partial_rounds": cfg.partial_rounds,
+            "alpha": cfg.alpha, "rate": cfg.rate, "capacity": cfg.capacity,
+            "mds": cfg.mds.iter().map(|r| r.iter().map(dec).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            "ark": cfg.ark.iter().map(|r| r.iter().map(dec).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        },
+        "jubjub": {
+            "a": ark_ed_on_bls12_381::EdwardsConfig::COEFF_A.to_string(),
+            "d": ark_ed_on_bls12_381::EdwardsConfig::COEFF_D.to_string(),
+            "base_modulus": Fr::MODULUS.to_string(),
+            "scalar_modulus": Fs::MODULUS.to_string(),
+        },
+        "tags": {
+            "NF_KEY": tag::NF_KEY, "VK_IN": tag::VK_IN, "SK_VIEW": tag::SK_VIEW,
+            "DIVERSIFY": tag::DIVERSIFY, "RHO": tag::RHO, "EPH": tag::EPH, "KDF": tag::KDF,
+            "STREAM": tag::STREAM, "MAC": tag::MAC, "LEAF": tag::LEAF, "MINT_LEAF": tag::MINT_LEAF,
+            "NF": tag::NF, "NODE": tag::NODE, "BODY": tag::BODY, "STMT": tag::STMT,
+        },
+        "DIVERSIFIER_LEN": DIVERSIFIER_LEN, "SCALAR_BITS": SCALAR_BITS,
+        "DIV_HASH_TRIES": DIV_HASH_TRIES, "N_IN": N_IN, "N_OUT": N_OUT,
+        "envelope": {
+            "magic": hex::encode(envelope::MAGIC), "version": envelope::VERSION,
+            "kind_transfer": envelope::KIND_TRANSFER, "kind_mint": envelope::KIND_MINT,
+            "ciphertext_len": CIPHERTEXT_LEN, "ct_out_len": envelope::CT_OUT_LEN,
+            "proof_len": envelope::PROOF_LEN,
+        },
+        "wallets": wallets.iter().map(|(name, addr, der)| json!({
+            "name": name, "address": addr,
+            "vk_in": fr_hex(&der.vk_in), "vk_out": hex::encode(der.vk_out),
+        })).collect::<Vec<_>>(),
+        "state": {
+            "activation": st.deployment.activation,
+            "operator_address": st.deployment.operator_address,
+            "replayed_height": st.replayed_height,
+            "leaves": st.tree.leaves().iter().map(fr_hex).collect::<Vec<_>>(),
+            "events": events,
+        },
+        "vectors": vectors,
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
 }
 
