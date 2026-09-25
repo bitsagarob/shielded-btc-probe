@@ -14,6 +14,7 @@ use bitcoin::{BlockHash, Network, ScriptBuf, Transaction, Txid};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -39,6 +40,8 @@ pub enum Error {
     WrongChain { expected: BlockHash, got: BlockHash },
     #[error("stored event {0} does not hold the envelope it claims")]
     CorruptEvent(Txid),
+    #[error("state replayed to {height} lies before activation {activation}")]
+    HeightBeforeActivation { height: u32, activation: u32 },
 }
 
 /// Deployment profile: fixed once, shared by every wallet and indexer.
@@ -195,6 +198,12 @@ impl State {
             source,
         })?;
         let f: StateFile = serde_json::from_reader(file)?;
+        if f.replayed_height < f.deployment.activation.saturating_sub(1) {
+            return Err(Error::HeightBeforeActivation {
+                height: f.replayed_height,
+                activation: f.deployment.activation,
+            });
+        }
         let mut tree = MerkleTree::new();
         for HexFr(l) in f.leaves {
             tree.append(l);
@@ -224,9 +233,20 @@ impl State {
             events: self.events.clone(),
             rejections: self.rejections.clone(),
         };
+        let bytes = serde_json::to_vec(&f)?;
         let tmp = path.with_extension("json.tmp");
-        serde_json::to_writer(std::fs::File::create(&tmp)?, &f)?;
-        std::fs::rename(tmp, path)?;
+        let write = || -> std::io::Result<()> {
+            let mut out = std::fs::File::create(&tmp)?;
+            out.write_all(&bytes)?;
+            out.sync_all()?;
+            std::fs::rename(&tmp, path)
+        };
+        if let Err(e) = write() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+        std::fs::File::open(dir.unwrap_or(Path::new(".")))?.sync_all()?;
         Ok(())
     }
 

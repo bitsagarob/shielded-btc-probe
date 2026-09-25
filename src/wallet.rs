@@ -395,12 +395,6 @@ impl Wallet {
         self.vault.as_ref().ok_or(Error::NoVaultKey)
     }
 
-    /// The vault key of a wallet known to be an operator's. Panics on a
-    /// viewing-only or unmigrated file; commands use `vault_key`.
-    pub fn vault(&self) -> FundingKey {
-        self.vault.clone().expect("this wallet has no vault key")
-    }
-
     pub fn balance(&self) -> Result<u64, Error> {
         self.file
             .notes
@@ -637,6 +631,9 @@ impl Wallet {
         dep: &Deployment,
         amount: u64,
     ) -> Result<(Txid, usize, usize, u64), Error> {
+        if amount == 0 {
+            return Err(Error::ZeroAmount);
+        }
         let addr = self.address();
         let r_seed = Fr::rand(&mut rand::thread_rng());
         let env = Envelope::Mint(MintEnvelope {

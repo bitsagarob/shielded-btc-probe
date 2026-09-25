@@ -1,5 +1,7 @@
 //! sbp: the Shielded Bitcoin probe CLI.
 
+#![forbid(unsafe_code)]
+
 use anyhow::{Context, Result, ensure};
 use ark_ec::twisted_edwards::TECurveConfig;
 use ark_ff::PrimeField;
@@ -164,9 +166,9 @@ fn parse_network(s: &str) -> Result<Network, String> {
 }
 
 fn load_deployment(dir: &Path) -> Result<Deployment> {
-    Ok(serde_json::from_reader(std::fs::File::open(
-        dir.join("deployment.json"),
-    )?)?)
+    let path = dir.join("deployment.json");
+    let f = std::fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_reader(f).with_context(|| format!("parsing {}", path.display()))
 }
 
 /// The deployment's network when the state dir has one, else the flag, else signet.
@@ -188,14 +190,22 @@ fn connect(cli: &Cli, network: Network) -> Result<Electrum> {
     Ok(Electrum::connect_checked(addr, network)?)
 }
 
+/// The state file must belong to the deployment profile next to it.
 fn load_state(dir: &Path) -> Result<State> {
     let dep = load_deployment(dir)?;
     let sp = dir.join("state.json");
-    if sp.exists() {
-        Ok(State::load(&sp)?)
-    } else {
-        Ok(State::fresh(dep))
+    if !sp.exists() {
+        return Ok(State::fresh(dep));
     }
+    let st = State::load(&sp)?;
+    ensure!(
+        st.deployment.activation == dep.activation
+            && st.deployment.vk_fingerprint == dep.vk_fingerprint,
+        "{} was replayed for another deployment than {}",
+        sp.display(),
+        dir.join("deployment.json").display()
+    );
+    Ok(st)
 }
 
 fn synced_state(cli: &Cli, params: &Params) -> Result<(State, Electrum)> {
@@ -330,10 +340,9 @@ fn deploy(
         vk_fingerprint: params.vk_fingerprint(),
     };
     std::fs::create_dir_all(&cli.state)?;
-    serde_json::to_writer_pretty(
-        std::fs::File::create(cli.state.join("deployment.json"))?,
-        &dep,
-    )?;
+    let mut text = serde_json::to_vec_pretty(&dep)?;
+    text.push(b'\n');
+    std::fs::write(cli.state.join("deployment.json"), text)?;
     println!(
         "network {network}\nfee rate {fee_rate} sat/vB\nactivation {activation}\nactivation hash {}\nvault {}\noperator {}\nvk {}",
         dep.activation_hash

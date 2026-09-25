@@ -47,8 +47,12 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("hex: {0}")]
+    Hex(#[from] hex::FromHexError),
+    #[error("consensus: {0}")]
+    Consensus(#[from] bitcoin::consensus::encode::Error),
     #[error("protocol: {0}")]
-    Protocol(String),
+    Shape(&'static str),
     #[error("insufficient funds: have {have} sat, need {need} sat")]
     InsufficientFunds { have: u64, need: u64 },
     #[error("fee did not converge")]
@@ -65,10 +69,6 @@ pub enum Error {
     PushBytes(#[from] PushBytesError),
     #[error(transparent)]
     Sighash(#[from] P2wpkhError),
-}
-
-fn protocol<E: std::fmt::Display>(e: E) -> Error {
-    Error::Protocol(e.to_string())
 }
 
 pub struct Electrum {
@@ -124,7 +124,7 @@ impl Electrum {
         Ok(e)
     }
 
-    pub fn call(&mut self, method: &str, params: Value) -> Result<Value, Error> {
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, Error> {
         self.next_id += 1;
         let req = json!({"id": self.next_id, "method": method, "params": params});
         self.writer.write_all(format!("{req}\n").as_bytes())?;
@@ -136,7 +136,7 @@ impl Electrum {
                 .take(MAX_REPLY_BYTES)
                 .read_line(&mut line)?;
             if n == 0 {
-                return Err(Error::Protocol("Fulcrum closed the connection".into()));
+                return Err(Error::Shape("Fulcrum closed the connection"));
             }
             if !line.ends_with('\n') {
                 return Err(Error::ReplyTooLong);
@@ -167,17 +167,13 @@ impl ChainSource for Electrum {
         v["height"]
             .as_u64()
             .and_then(|h| u32::try_from(h).ok())
-            .ok_or_else(|| protocol("bad height in header"))
+            .ok_or(Error::Shape("bad height in header"))
     }
 
     fn block_hash(&mut self, height: u32) -> Result<BlockHash, Error> {
         let hex = self.call("blockchain.block.header", json!([height]))?;
-        let raw = hex::decode(
-            hex.as_str()
-                .ok_or_else(|| protocol("header not a string"))?,
-        )
-        .map_err(protocol)?;
-        let header: bitcoin::block::Header = deserialize(&raw).map_err(protocol)?;
+        let raw = hex::decode(hex.as_str().ok_or(Error::Shape("header not a string"))?)?;
+        let header: bitcoin::block::Header = deserialize(&raw)?;
         Ok(header.block_hash())
     }
 
@@ -194,9 +190,9 @@ impl ChainSource for Electrum {
             ) {
                 Ok(v) => out.push(
                     v.as_str()
-                        .ok_or_else(|| protocol("txid not a string"))?
+                        .ok_or(Error::Shape("txid not a string"))?
                         .parse()
-                        .map_err(protocol)?,
+                        .map_err(|_| Error::Shape("bad txid"))?,
                 ),
                 // Fulcrum sends its generic code 1 here too, so only the message marks the end.
                 Err(Error::Rpc { message, .. })
@@ -212,11 +208,9 @@ impl ChainSource for Electrum {
 
     fn transaction(&mut self, txid: &Txid) -> Result<Transaction, Error> {
         let hex = self.call("blockchain.transaction.get", json!([txid.to_string()]))?;
-        deserialize(
-            &hex::decode(hex.as_str().ok_or_else(|| protocol("tx not a string"))?)
-                .map_err(protocol)?,
-        )
-        .map_err(protocol)
+        Ok(deserialize(&hex::decode(
+            hex.as_str().ok_or(Error::Shape("tx not a string"))?,
+        )?)?)
     }
 
     fn broadcast(&mut self, tx: &Transaction) -> Result<Txid, Error> {
@@ -225,9 +219,9 @@ impl ChainSource for Electrum {
             json!([hex::encode(serialize(tx))]),
         )?;
         v.as_str()
-            .ok_or_else(|| protocol("txid not a string"))?
+            .ok_or(Error::Shape("txid not a string"))?
             .parse()
-            .map_err(protocol)
+            .map_err(|_| Error::Shape("bad txid"))
     }
 
     fn listunspent(&mut self, spk: &ScriptBuf) -> Result<Vec<Utxo>, Error> {
@@ -237,7 +231,7 @@ impl ChainSource for Electrum {
         )?;
         let arr = v
             .as_array()
-            .ok_or_else(|| protocol("listunspent not an array"))?;
+            .ok_or(Error::Shape("listunspent not an array"))?;
         arr.iter()
             .map(|u| {
                 Ok(Utxo {
@@ -246,11 +240,13 @@ impl ChainSource for Electrum {
                             .as_str()
                             .unwrap_or_default()
                             .parse()
-                            .map_err(protocol)?,
-                        u32::try_from(u["tx_pos"].as_u64().unwrap_or(0)).map_err(protocol)?,
+                            .map_err(|_| Error::Shape("bad txid"))?,
+                        u32::try_from(u["tx_pos"].as_u64().unwrap_or(0))
+                            .map_err(|_| Error::Shape("tx_pos over u32"))?,
                     ),
                     value: u["value"].as_u64().unwrap_or(0),
-                    height: u32::try_from(u["height"].as_u64().unwrap_or(0)).map_err(protocol)?,
+                    height: u32::try_from(u["height"].as_u64().unwrap_or(0))
+                        .map_err(|_| Error::Shape("height over u32"))?,
                 })
             })
             .collect()
@@ -263,14 +259,14 @@ impl ChainSource for Electrum {
         )?;
         let arr = v
             .as_array()
-            .ok_or_else(|| Error::Protocol("get_history not an array".into()))?;
+            .ok_or(Error::Shape("get_history not an array"))?;
         arr.iter()
             .map(|h| {
                 let txid = h["tx_hash"]
                     .as_str()
                     .unwrap_or_default()
                     .parse()
-                    .map_err(|_| Error::Protocol("bad txid in history".into()))?;
+                    .map_err(|_| Error::Shape("bad txid in history"))?;
                 Ok((txid, h["height"].as_i64().unwrap_or(0)))
             })
             .collect()

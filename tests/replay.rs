@@ -436,3 +436,74 @@ fn sync_refuses_a_chain_without_the_activation_hash_instead_of_rebuilding() {
     assert_eq!(st.sync(&mut chain, params()).unwrap(), 1);
     assert_eq!(st.replayed_height, 1000);
 }
+
+#[test]
+fn load_rejects_hostile_state_files_and_a_height_before_activation() {
+    let st = State::fresh(dep());
+    let p = scratch("hostile").join("s.json");
+    st.save(&p).unwrap();
+    let text = std::fs::read_to_string(&p).unwrap();
+    assert!(text.contains("\"replayed_height\":999"));
+    let cases = [
+        (
+            "negative height",
+            text.replace("\"replayed_height\":999", "\"replayed_height\":-1"),
+        ),
+        (
+            "huge height",
+            text.replace("\"replayed_height\":999", "\"replayed_height\":99999999999"),
+        ),
+        (
+            "bad leaf",
+            text.replace("\"leaves\":[]", "\"leaves\":[\"zz\"]"),
+        ),
+        (
+            "non-canonical leaf",
+            text.replace(
+                "\"leaves\":[]",
+                &format!("\"leaves\":[\"{}\"]", "ff".repeat(32)),
+            ),
+        ),
+        (
+            "short leaf",
+            text.replace("\"leaves\":[]", "\"leaves\":[\"00\"]"),
+        ),
+        ("not json", "{".into()),
+        ("empty", String::new()),
+        (
+            "before activation",
+            text.replace("\"replayed_height\":999", "\"replayed_height\":998"),
+        ),
+    ];
+    for (name, body) in cases {
+        std::fs::write(&p, body).unwrap();
+        assert!(State::load(&p).is_err(), "{name} loaded");
+    }
+    std::fs::write(
+        &p,
+        text.replace("\"replayed_height\":999", "\"replayed_height\":0"),
+    )
+    .unwrap();
+    assert!(matches!(
+        State::load(&p),
+        Err(shielded_probe::indexer::Error::HeightBeforeActivation {
+            height: 0,
+            activation: 1000
+        })
+    ));
+}
+
+#[test]
+fn a_failed_state_save_leaves_no_tmp_file_behind() {
+    let dir = scratch("save-fail");
+    let p = dir.join("s.json");
+    let tmp = p.with_extension("json.tmp");
+    let st = State::fresh(dep());
+    std::fs::create_dir_all(p.join("x")).unwrap();
+    assert!(st.save(&p).is_err());
+    assert!(!tmp.exists(), "tmp file left behind");
+    std::fs::remove_dir_all(&p).unwrap();
+    st.save(&p).unwrap();
+    assert!(!tmp.exists());
+    assert_eq!(State::load(&p).unwrap().replayed_height, 999);
+}

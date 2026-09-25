@@ -558,3 +558,96 @@ fn sync_caps_the_rejection_log() {
     assert_eq!(st.rejections.len(), MAX_REJECTIONS);
     assert_eq!(st.rejections[0].height, 500);
 }
+
+fn sbp(args: &[&str], cwd: &std::path::Path) -> (i32, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_sbp"))
+        .args(args)
+        .current_dir(cwd)
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+#[test]
+fn cli_names_the_missing_profile_checks_state_against_it_and_refuses_a_zero_mint() {
+    let root = tmp("cli");
+    std::fs::create_dir_all(&root).unwrap();
+    let state = root.join("state");
+    let wallet = root.join("w.json");
+    let (w, s, params_dir) = (
+        wallet.to_str().unwrap(),
+        state.to_str().unwrap(),
+        root.join("params").to_str().unwrap().to_owned(),
+    );
+    let (code, _) = sbp(&["init", "--wallet", w, "--state", s], &root);
+    assert_eq!(code, 0);
+    let (code, text) = sbp(&["status", "--state", s], &root);
+    assert_ne!(code, 0);
+    assert!(
+        text.contains(&format!(
+            "reading {}",
+            state.join("deployment.json").display()
+        )),
+        "{text}"
+    );
+    let electrum = one_header_server(genesis_hex(Network::Signet), 1000);
+    let (code, text) = sbp(
+        &[
+            "--params",
+            &params_dir,
+            "--electrum",
+            &electrum,
+            "deploy",
+            "--state",
+            s,
+            "--activation",
+            "1",
+            "--operator-wallet",
+            w,
+        ],
+        &root,
+    );
+    assert_eq!(code, 0, "{text}");
+    let profile = std::fs::read(state.join("deployment.json")).unwrap();
+    assert_eq!(profile.last(), Some(&b'\n'));
+    assert!(text.contains(&format!(
+        "activation hash {}",
+        genesis_block(Network::Signet).block_hash()
+    )));
+    let (code, text) = sbp(
+        &[
+            "--electrum",
+            &electrum,
+            "mint",
+            "--state",
+            s,
+            "--wallet",
+            w,
+            "--amount",
+            "0",
+        ],
+        &root,
+    );
+    assert_ne!(code, 0);
+    assert!(text.contains("amount must be positive"), "{text}");
+    // A state file replayed for another deployment.
+    let dep: Deployment = serde_json::from_slice(&profile).unwrap();
+    State::fresh(Deployment {
+        activation: 500,
+        ..dep
+    })
+    .save(&state.join("state.json"))
+    .unwrap();
+    let (code, text) = sbp(&["status", "--state", s], &root);
+    assert_ne!(code, 0);
+    assert!(text.contains("another deployment"), "{text}");
+    assert!(!text.contains("panicked"));
+}
