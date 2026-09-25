@@ -2,13 +2,18 @@
 //! fixed behaviour. Nothing here broadcasts; every Electrum test talks to a
 //! scripted mock on loopback that the test itself owns.
 
-use bitcoin::Txid;
-use bitcoin::{BlockHash, Network, ScriptBuf, blockdata::constants::genesis_block, hashes::Hash};
+use ark_ff::{BigInteger, Field, PrimeField};
+use bitcoin::{
+    BlockHash, Network, ScriptBuf, Txid, blockdata::constants::genesis_block, hashes::Hash,
+};
 use serde_json::{Value, json};
 use shielded_probe::{
-    Fr,
+    EdwardsAffine, Fr,
     chain::{ChainSource, Electrum, Error as ChainError, MockChain},
+    envelope::{CT_OUT_LEN, Envelope, Error as EnvError, PROOF_LEN, Payout, TransferEnvelope},
     indexer::{Deployment, Error as IndexerError, MAX_REJECTIONS, Rejection, State},
+    keys::{self, WalletKeys},
+    note::{self, NotePlaintext},
     prover::Params,
 };
 use std::{
@@ -33,6 +38,200 @@ fn dep() -> Deployment {
             .unwrap(),
         operator_address: String::new(),
         vk_fingerprint: String::new(),
+    }
+}
+
+fn transfer() -> TransferEnvelope {
+    let w = WalletKeys::from_seed([3u8; 32]);
+    let a = w.address(0);
+    let n = NotePlaintext {
+        v: 5,
+        d: a.d,
+        r_seed: Fr::from(8u64),
+    };
+    let (pk, ct) = note::encrypt(&n, &a.pk_d).unwrap();
+    TransferEnvelope {
+        h_anchor: 42,
+        nf: [Fr::from(1u64), Fr::from(2u64)],
+        pk_eph: [pk, pk],
+        ct: [ct, ct],
+        ct_out: vec![9u8; CT_OUT_LEN],
+        payout: None,
+        proof: vec![0u8; PROOF_LEN],
+    }
+}
+
+#[test]
+fn envelope_every_truncation_and_bitflip_is_an_error_not_a_panic() {
+    let bytes = transfer().to_bytes();
+    for n in 0..bytes.len() {
+        assert!(
+            !matches!(Envelope::parse(&bytes[..n]), Ok(Some(_))),
+            "prefix {n} parsed"
+        );
+    }
+    for i in 0..bytes.len() {
+        for bit in 0..8 {
+            let mut b = bytes.clone();
+            b[i] ^= 1 << bit;
+            let _ = Envelope::parse(&b);
+        }
+    }
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert_eq!(Envelope::parse(&longer), Err(EnvError::TrailingBytes));
+}
+
+#[test]
+fn envelope_compact_size_edges() {
+    let bytes = transfer().to_bytes();
+    let splice = |enc: &[u8]| {
+        let mut b = bytes[..10].to_vec();
+        b.extend_from_slice(enc);
+        b.extend_from_slice(&bytes[11..]);
+        Envelope::parse(&b)
+    };
+    assert_eq!(splice(&[0]), Err(EnvError::InputCount));
+    assert_eq!(splice(&[0xfd, 2, 0]), Err(EnvError::NonMinimalCount));
+    assert_eq!(splice(&[0xfd, 253, 0]), Err(EnvError::InputCount));
+    assert_eq!(splice(&[0xfe, 2, 0, 0, 0]), Err(EnvError::NonMinimalCount));
+    assert_eq!(
+        splice(&[0xfe, 0xff, 0xff, 0xff, 0xff]),
+        Err(EnvError::InputCount)
+    );
+    assert_eq!(splice(&[0xff]), Err(EnvError::NonMinimalCount));
+    assert!(splice(&[0xfd]).is_err());
+    assert!(splice(&[0xfe, 1]).is_err());
+    assert_eq!(Envelope::parse(&bytes[..10]), Err(EnvError::Truncated));
+    assert_eq!(
+        Envelope::parse(&[&bytes[..10], &[0xfe, 1][..]].concat()),
+        Err(EnvError::Truncated)
+    );
+}
+
+#[test]
+fn envelope_payout_length_edges() {
+    let body_len = transfer().body_bytes().len();
+    let bytes = transfer().to_bytes();
+    let with_payout = |enc: &[u8], tail: &[u8]| {
+        let mut b = bytes[..body_len - 1].to_vec();
+        b.extend_from_slice(enc);
+        b.extend_from_slice(tail);
+        b.extend_from_slice(&bytes[body_len..]);
+        Envelope::parse(&b)
+    };
+    for plen in 1..=8u8 {
+        assert_eq!(
+            with_payout(&[plen], &vec![0u8; plen as usize]),
+            Err(EnvError::PayoutTooShort),
+            "plen {plen}"
+        );
+    }
+    assert!(matches!(with_payout(&[9], &[0u8; 9]), Ok(Some(_))));
+    let mut t = transfer();
+    t.payout = Some(Payout {
+        amount: 1,
+        script_pubkey: vec![0x51; 255],
+    });
+    assert_eq!(
+        Envelope::parse(&t.to_bytes()).unwrap(),
+        Some(Envelope::Transfer(Box::new(t.clone())))
+    );
+    // A length claiming 4 GB is Truncated, without allocating.
+    assert_eq!(
+        with_payout(&[0xfe, 0xff, 0xff, 0xff, 0xff], &[]),
+        Err(EnvError::Truncated)
+    );
+    assert_eq!(with_payout(&[0xff], &[]), Err(EnvError::NonMinimalCount));
+    assert_eq!(
+        with_payout(&[0xfd, 9, 0], &[0u8; 9]),
+        Err(EnvError::NonMinimalCount)
+    );
+}
+
+#[test]
+fn envelope_field_elements_at_r_minus_one_r_and_r_plus_one() {
+    let r = Fr::MODULUS;
+    let mut minus = r;
+    minus.sub_with_borrow(&ark_ff::BigInt::from(1u64));
+    let mut plus = r;
+    plus.add_with_carry(&ark_ff::BigInt::from(1u64));
+    let enc = |b: ark_ff::BigInt<4>| {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&b.to_bytes_le());
+        out
+    };
+    assert!(keys::fr_from_bytes(&enc(minus)).is_some());
+    assert!(keys::fr_from_bytes(&enc(r)).is_none());
+    assert!(keys::fr_from_bytes(&enc(plus)).is_none());
+    assert!(keys::fr_from_bytes(&[0xff; 32]).is_none());
+    let mut b = transfer().to_bytes();
+    b[12..44].copy_from_slice(&enc(r));
+    assert_eq!(Envelope::parse(&b), Err(EnvError::Nullifier));
+}
+
+#[test]
+fn envelope_identity_is_accepted_and_small_order_points_are_rejected() {
+    let id = EdwardsAffine::default();
+    assert!(id.is_zero());
+    assert_eq!(keys::point_from_bytes(&keys::point_to_bytes(&id)), Some(id));
+    // (0, -1) has order 2 on Jubjub.
+    let two = EdwardsAffine::new_unchecked(Fr::from(0u64), -Fr::from(1u64));
+    assert!(two.is_on_curve());
+    assert!(!two.is_in_correct_subgroup_assuming_on_curve());
+    assert_eq!(keys::point_from_bytes(&keys::point_to_bytes(&two)), None);
+    let bytes = transfer().to_bytes();
+    let mut b = bytes.clone();
+    b[76..108].copy_from_slice(&keys::point_to_bytes(&two));
+    assert_eq!(Envelope::parse(&b), Err(EnvError::PkEph));
+    let mut b = bytes.clone();
+    b[76..108].copy_from_slice(&[0x55; 32]);
+    assert!(Envelope::parse(&b).is_err());
+    // The identity as pk_eph decrypts to nothing for everyone.
+    let mut t = transfer();
+    t.pk_eph[0] = id;
+    let Ok(Some(Envelope::Transfer(t))) = Envelope::parse(&t.to_bytes()) else {
+        panic!("identity pk_eph does not parse")
+    };
+    let sk_view = WalletKeys::from_seed([3u8; 32]).derive().sk_view;
+    assert_eq!(
+        note::decrypt_as_recipient(&t.ct[0], &t.pk_eph[0], &sk_view),
+        None
+    );
+}
+
+#[test]
+fn ciphertext_decrypting_above_the_packed_range_is_rejected() {
+    let w = WalletKeys::from_seed([3u8; 32]);
+    let a = w.address(0);
+    let der = w.derive();
+    let s = note::sk_eph(&Fr::from(8u64));
+    let g_d = keys::diversify_hash(&a.d).unwrap().base;
+    let pk_eph = keys::mul(&g_d, &s);
+    let key = note::note_key(&keys::mul(&a.pk_d, &s), &pk_eph);
+    // m0 = d * 2^64 + v is legal; add 2^152, one bit above the 19 packed bytes.
+    let mut m0 = note::pack_vd(u64::MAX, &a.d);
+    m0 += Fr::from(2u64).pow([152u64]);
+    let ct = note::encrypt_with_key(&key, &m0, &Fr::from(8u64));
+    assert_eq!(note::decrypt_as_recipient(&ct, &pk_eph, &der.sk_view), None);
+    let ct = note::encrypt_with_key(&key, &(-Fr::from(1u64)), &Fr::from(8u64));
+    assert_eq!(note::decrypt_as_recipient(&ct, &pk_eph, &der.sk_view), None);
+}
+
+#[test]
+fn envelope_random_payloads_with_magic_never_panic() {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(7);
+    for _ in 0..20_000 {
+        let len = rng.gen_range(0..900);
+        let mut b: Vec<u8> = (0..len).map(|_| rng.r#gen()).collect();
+        if b.len() >= 6 {
+            b[..3].copy_from_slice(b"sbp");
+            b[3] = 1;
+            b[4] = rng.gen_range(0..4);
+            b[5] = 0;
+        }
+        let _ = Envelope::parse(&b);
     }
 }
 
