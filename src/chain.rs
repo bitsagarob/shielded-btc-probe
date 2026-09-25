@@ -16,7 +16,7 @@ use bitcoin::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
 };
 
@@ -26,6 +26,10 @@ mod mock;
 pub use mock::MockChain;
 
 pub const DEFAULT_ELECTRUM: &str = "127.0.0.1:50001";
+/// Longest reply line the client reads before giving up on the server.
+pub const MAX_REPLY_BYTES: u64 = 16 << 20;
+/// Most transactions block_txids enumerates for one block.
+pub const MAX_BLOCK_TXS: usize = 1_000_000;
 pub const DEFAULT_ELECTRUM_BITCOIN: &str = "127.0.0.1:50011";
 
 pub fn default_electrum(network: Network) -> &'static str {
@@ -51,6 +55,10 @@ pub enum Error {
     FeeDidNotConverge,
     #[error("wrong chain: genesis block is {got}, expected {expected}")]
     WrongGenesis { expected: BlockHash, got: BlockHash },
+    #[error("reply longer than {MAX_REPLY_BYTES} bytes")]
+    ReplyTooLong,
+    #[error("block {0} reports more than {MAX_BLOCK_TXS} transactions")]
+    BlockTooLarge(u32),
     #[error(transparent)]
     PushBytes(#[from] PushBytesError),
     #[error(transparent)]
@@ -122,8 +130,14 @@ impl Electrum {
         // skip anything that is not the reply to this id.
         let v: Value = loop {
             let mut line = String::new();
-            if self.reader.read_line(&mut line)? == 0 {
+            let n = (&mut self.reader)
+                .take(MAX_REPLY_BYTES)
+                .read_line(&mut line)?;
+            if n == 0 {
                 return Err(Error::Protocol("Fulcrum closed the connection".into()));
+            }
+            if !line.ends_with('\n') {
+                return Err(Error::ReplyTooLong);
             }
             let v: Value = serde_json::from_str(&line)?;
             if v.get("id").and_then(|i| i.as_u64()) == Some(self.next_id) {
@@ -150,8 +164,8 @@ impl ChainSource for Electrum {
         let v = self.call("blockchain.headers.subscribe", json!([]))?;
         v["height"]
             .as_u64()
-            .map(|h| h as u32)
-            .ok_or_else(|| protocol("no height in header"))
+            .and_then(|h| u32::try_from(h).ok())
+            .ok_or_else(|| protocol("bad height in header"))
     }
 
     fn block_hash(&mut self, height: u32) -> Result<BlockHash, Error> {
@@ -169,6 +183,9 @@ impl ChainSource for Electrum {
     fn block_txids(&mut self, height: u32) -> Result<Vec<Txid>, Error> {
         let mut out = Vec::new();
         loop {
+            if out.len() >= MAX_BLOCK_TXS {
+                return Err(Error::BlockTooLarge(height));
+            }
             match self.call(
                 "blockchain.transaction.id_from_pos",
                 json!([height, out.len()]),
@@ -179,6 +196,7 @@ impl ChainSource for Electrum {
                         .parse()
                         .map_err(protocol)?,
                 ),
+                // Fulcrum sends its generic code 1 here too, so only the message marks the end.
                 Err(Error::Rpc { message, .. })
                     if message.starts_with("No transaction at position") =>
                 {
@@ -227,10 +245,10 @@ impl ChainSource for Electrum {
                             .unwrap_or_default()
                             .parse()
                             .map_err(protocol)?,
-                        u["tx_pos"].as_u64().unwrap_or(0) as u32,
+                        u32::try_from(u["tx_pos"].as_u64().unwrap_or(0)).map_err(protocol)?,
                     ),
                     value: u["value"].as_u64().unwrap_or(0),
-                    height: u["height"].as_u64().unwrap_or(0) as u32,
+                    height: u32::try_from(u["height"].as_u64().unwrap_or(0)).map_err(protocol)?,
                 })
             })
             .collect()

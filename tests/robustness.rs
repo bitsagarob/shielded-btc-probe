@@ -2,12 +2,13 @@
 //! fixed behaviour. Nothing here broadcasts; every Electrum test talks to a
 //! scripted mock on loopback that the test itself owns.
 
+use bitcoin::Txid;
 use bitcoin::{BlockHash, Network, ScriptBuf, blockdata::constants::genesis_block, hashes::Hash};
 use serde_json::{Value, json};
 use shielded_probe::{
     Fr,
-    chain::{Electrum, Error as ChainError},
-    indexer::{Deployment, Error as IndexerError, State},
+    chain::{ChainSource, Electrum, Error as ChainError, MockChain},
+    indexer::{Deployment, Error as IndexerError, MAX_REJECTIONS, Rejection, State},
     prover::Params,
 };
 use std::{
@@ -167,4 +168,146 @@ fn sync_without_activation_hash_keeps_treating_a_moved_tip_as_a_reorg() {
     st.sync(&mut e, params()).unwrap();
     assert_eq!(st.tree.len(), 0);
     assert_eq!(st.replayed_height, 1000);
+}
+
+#[test]
+fn electrum_malformed_json_is_an_error() {
+    let addr = mock(version_then(|_| Some(b"{not json\n".to_vec())));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(matches!(e.tip_height(), Err(ChainError::Json(_))));
+}
+
+#[test]
+fn electrum_right_id_wrong_type_is_an_error() {
+    let addr = mock(version_then(|req| Some(ok(req, json!("a string")))));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(e.tip_height().is_err());
+    assert!(e.block_hash(1).is_err());
+    assert!(e.block_txids(1).is_err());
+    assert!(e.transaction(&Txid::all_zeros()).is_err());
+    assert!(e.listunspent(&ScriptBuf::new()).is_err());
+    assert!(e.history(&ScriptBuf::new()).is_err());
+}
+
+#[test]
+fn electrum_error_without_code_or_message_is_an_error() {
+    let addr = mock(version_then(|req| {
+        Some(format!("{}\n", json!({"id": req["id"], "error": {}})).into_bytes())
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(matches!(
+        e.tip_height(),
+        Err(ChainError::Rpc { code: 0, .. })
+    ));
+    let addr = mock(version_then(|req| {
+        Some(format!("{}\n", json!({"id": req["id"], "error": "boom"})).into_bytes())
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(e.tip_height().is_err());
+}
+
+#[test]
+fn electrum_short_header_non_hex_tx_and_bad_txid_are_errors() {
+    let addr = mock(version_then(|req| {
+        Some(match method(req) {
+            "blockchain.block.header" => ok(req, json!("00".repeat(40))),
+            "blockchain.transaction.get" => ok(req, json!("zz")),
+            "blockchain.transaction.id_from_pos" => ok(req, json!("nottxid")),
+            _ => ok(req, Value::Null),
+        })
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(e.block_hash(1).is_err());
+    assert!(e.transaction(&Txid::all_zeros()).is_err());
+    assert!(e.block_txids(1).is_err());
+}
+
+#[test]
+fn electrum_connection_drop_mid_block_leaves_state_untouched() {
+    let hdr = "00".repeat(80);
+    let addr = mock(version_then(move |req| {
+        Some(match method(req) {
+            "blockchain.headers.subscribe" => ok(req, json!({"height": 1001})),
+            "blockchain.block.header" => ok(req, json!(hdr)),
+            _ => return None,
+        })
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    let mut st = State::fresh(dep());
+    let err = st.sync(&mut e, params()).unwrap_err();
+    assert!(err.to_string().contains("closed"), "{err}");
+    assert_eq!(st.replayed_height, 999);
+    assert!(st.block_hashes.is_empty());
+}
+
+/// The 30 s read timeout is the only guard against a silent server.
+#[test]
+#[ignore = "waits out the 30 s read timeout"]
+fn electrum_server_that_never_answers_times_out() {
+    let addr = mock(version_then(|_| {
+        thread::sleep(std::time::Duration::from_secs(40));
+        None
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(matches!(e.tip_height(), Err(ChainError::Io(_))));
+}
+
+/// A server that never says "No transaction at position" ends at the cap.
+#[test]
+#[ignore = "a million loopback round trips, about 40 s"]
+fn electrum_block_txids_stops_at_the_cap() {
+    let addr = mock(version_then(|req| {
+        Some(ok(req, json!(Txid::all_zeros().to_string())))
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(matches!(
+        e.block_txids(7),
+        Err(ChainError::BlockTooLarge(7))
+    ));
+}
+
+#[test]
+fn electrum_overlong_reply_is_an_error() {
+    let addr = mock(version_then(|_| {
+        let mut v = vec![b'a'; 17 << 20];
+        v.push(b'\n');
+        Some(v)
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(matches!(e.tip_height(), Err(ChainError::ReplyTooLong)));
+}
+
+#[test]
+fn electrum_height_over_u32_is_an_error() {
+    let addr = mock(version_then(|req| {
+        Some(match method(req) {
+            "blockchain.headers.subscribe" => ok(req, json!({"height": (1u64 << 32) + 5})),
+            "blockchain.scripthash.listunspent" => ok(
+                req,
+                json!([{"tx_hash": Txid::all_zeros().to_string(), "tx_pos": 0,
+                    "value": 1, "height": 1u64 << 32}]),
+            ),
+            _ => ok(req, Value::Null),
+        })
+    }));
+    let mut e = Electrum::connect(&addr).unwrap();
+    assert!(e.tip_height().is_err());
+    assert!(e.listunspent(&ScriptBuf::new()).is_err());
+}
+
+#[test]
+fn sync_caps_the_rejection_log() {
+    let mut st = State::fresh(dep());
+    for i in 0..(MAX_REJECTIONS + 500) {
+        st.rejections.push(Rejection {
+            txid: Txid::all_zeros(),
+            height: i as u32,
+            reason: String::new(),
+        });
+    }
+    let mut chain = MockChain::new(999);
+    chain.mine(vec![]);
+    st.sync(&mut chain, params()).unwrap();
+    assert_eq!(st.rejections.len(), MAX_REJECTIONS);
+    assert_eq!(st.rejections[0].height, 500);
 }
