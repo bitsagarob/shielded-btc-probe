@@ -34,6 +34,10 @@ pub enum Error {
     Setup(SynthesisError),
     #[error("stored keys are for a circuit with {found} variables, this build has {expected}")]
     StaleKeys { expected: usize, found: usize },
+    #[error("stored verifying key has {found} public inputs, this circuit has {expected}")]
+    VerifyingKeyShape { expected: usize, found: usize },
+    #[error("stored proving and verifying keys are from different setups")]
+    KeyMismatch,
     #[error("prove: {0:?}")]
     Prove(SynthesisError),
 }
@@ -44,9 +48,10 @@ pub struct Params {
     pub pvk: PreparedVerifyingKey<Bls12_381>,
 }
 
-/// Number of R1CS variables in the transfer circuit, which is also the length
-/// of a matching proving key's `a_query`.
-pub fn circuit_variables() -> Result<usize, Error> {
+/// (instance, witness) variable counts of the transfer circuit: the length
+/// of a matching verifying key's `gamma_abc_g1` and, summed, of a matching
+/// proving key's `a_query`.
+pub fn circuit_shape() -> Result<(usize, usize), Error> {
     let cs = ConstraintSystem::<Fr>::new_ref();
     cs.set_mode(SynthesisMode::Setup);
     TransferCircuit {
@@ -55,7 +60,12 @@ pub fn circuit_variables() -> Result<usize, Error> {
     }
     .generate_constraints(cs.clone())
     .map_err(Error::Setup)?;
-    Ok(cs.num_instance_variables() + cs.num_witness_variables())
+    Ok((cs.num_instance_variables(), cs.num_witness_variables()))
+}
+
+pub fn circuit_variables() -> Result<usize, Error> {
+    let (instance, witness) = circuit_shape()?;
+    Ok(instance + witness)
 }
 
 impl Params {
@@ -82,12 +92,21 @@ impl Params {
             let vk =
                 VerifyingKey::deserialize_uncompressed_unchecked(std::fs::File::open(&vk_path)?)
                     .map_err(Error::VerifyingKey)?;
-            let expected = circuit_variables()?;
-            if pk.a_query.len() != expected {
+            let (instance, witness) = circuit_shape()?;
+            if pk.a_query.len() != instance + witness {
                 return Err(Error::StaleKeys {
-                    expected,
+                    expected: instance + witness,
                     found: pk.a_query.len(),
                 });
+            }
+            if vk.gamma_abc_g1.len() != instance {
+                return Err(Error::VerifyingKeyShape {
+                    expected: instance,
+                    found: vk.gamma_abc_g1.len(),
+                });
+            }
+            if pk.vk != vk {
+                return Err(Error::KeyMismatch);
             }
             let pvk = prepare_verifying_key(&vk);
             return Ok(Self { pk, vk, pvk });
@@ -154,6 +173,35 @@ mod tests {
         assert!(matches!(
             Params::load_or_setup(&dir),
             Err(Error::StaleKeys { .. })
+        ));
+        fresh
+            .pk
+            .serialize_uncompressed(std::fs::File::create(dir.join("transfer.pk")).unwrap())
+            .unwrap();
+        let mut wide = fresh.vk.clone();
+        wide.gamma_abc_g1.push(wide.gamma_abc_g1[0]);
+        wide.serialize_uncompressed(std::fs::File::create(dir.join("transfer.vk")).unwrap())
+            .unwrap();
+        assert!(matches!(
+            Params::load_or_setup(&dir),
+            Err(Error::VerifyingKeyShape {
+                expected: 3,
+                found: 4
+            })
+        ));
+        let mut foreign = fresh.vk.clone();
+        foreign.gamma_abc_g1.swap(0, 1);
+        foreign
+            .serialize_uncompressed(std::fs::File::create(dir.join("transfer.vk")).unwrap())
+            .unwrap();
+        assert!(matches!(
+            Params::load_or_setup(&dir),
+            Err(Error::KeyMismatch)
+        ));
+        std::fs::write(dir.join("transfer.pk"), b"").unwrap();
+        assert!(matches!(
+            Params::load_or_setup(&dir),
+            Err(Error::ProvingKey(_))
         ));
         std::fs::remove_dir_all(dir).unwrap();
     }
