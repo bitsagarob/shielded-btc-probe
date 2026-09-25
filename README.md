@@ -52,6 +52,19 @@ A chain error, an empty vault or a fee that does not converge leaves a payout re
 Output 0 of a payout-carrying transfer is marked burned only in the operator wallet; any other recipient keeps the note.
 PROFILE.md records the corrected witness list, the 64-bit value range, the wallet anchor policy and the attacks the public setup allows.
 
+## Alignment pass (25 September 2026)
+
+A second audit, this time of every normative statement and default in the
+paper's sections 5 to 16 and Appendix A, is the first section of PROFILE.md.
+It changed the counts to CompactSize, put const_salt under h_body and
+const_salt plus aux_null in the leaf hash, made sk_spend a Jubjub scalar whose
+canonical bytes feed sk_nf and vk_in, and gave the wallet the A.6 anchor
+policy: K_WALLET = 2, so a note is spendable one block after the block that
+created it. Envelope sizes did not change; the circuit is 96,039 constraints.
+The three departures that stay (HKDF-SHA256 key chain, 67-byte byte AEAD,
+byte-hash DiversifyHash) are measured in PROFILE.md section 2: 2.6x to 8.2x
+the constraints each, 19.7x together.
+
 ## Run it
 
 ```
@@ -72,6 +85,8 @@ cargo build --release
 
 `params/` holds the Groth16 keys (56 MB, generated on first use from a fixed
 seed). `state/` holds wallets and the indexer state. Both are ignored by git.
+`send` and `redeem` anchor one block below the replayed tip, so a note minted
+or received in block h can be spent once the indexer has replayed block h + 1.
 
 On a bitcoin deployment two commands change: `mint` refuses an amount over
 100,000 sat unless `--i-know` is passed, and `payouts` runs only with
