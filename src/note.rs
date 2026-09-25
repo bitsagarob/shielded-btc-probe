@@ -224,7 +224,7 @@ pub fn encrypt_recovery(
     let mut pt = Vec::with_capacity(records.len() * 64);
     for (pk_d, s) in records {
         pt.extend_from_slice(&keys::point_to_bytes(pk_d));
-        pt.extend_from_slice(&s.into_bigint().to_bytes_le());
+        pt.extend_from_slice(&keys::scalar_to_bytes(s));
     }
     ChaCha20Poly1305::new((&key).into())
         .encrypt(
@@ -259,7 +259,7 @@ pub fn decrypt_recovery(
         .map(|c| {
             Some((
                 keys::point_from_bytes(&c[..32])?,
-                Fs::from_le_bytes_mod_order(&c[32..]),
+                keys::scalar_from_bytes(&c[32..]),
             ))
         })
         .collect()

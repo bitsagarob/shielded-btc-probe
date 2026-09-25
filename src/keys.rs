@@ -45,7 +45,28 @@ pub fn fr_from_bytes(b: &[u8]) -> Option<Fr> {
     (fr_to_bytes(&candidate)[..] == b[..]).then_some(candidate)
 }
 
-/// Fr element -> Jubjub scalar by keeping the low SCALAR_BITS bits.
+/// ScalarFromBytes for scalars the circuit never re-derives: reduce mod the
+/// Jubjub group order.
+pub fn scalar_from_bytes(b: &[u8]) -> Fs {
+    Fs::from_le_bytes_mod_order(b)
+}
+
+/// BytesFromScalar: the canonical 32-byte little-endian encoding.
+pub fn scalar_to_bytes(s: &Fs) -> [u8; 32] {
+    let v = s.into_bigint().to_bytes_le();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&v);
+    out
+}
+
+/// The scalar's canonical bytes read as a field element; how the circuit
+/// sees sk_spend.
+pub fn scalar_to_field(s: &Fs) -> Fr {
+    Fr::from_le_bytes_mod_order(&scalar_to_bytes(s))
+}
+
+/// Fr element -> Jubjub scalar by keeping the low SCALAR_BITS bits: the
+/// ScalarFromBytes used for scalars the circuit derives from a hash.
 pub fn scalar_from_field(x: &Fr) -> Fs {
     let bits = x.into_bigint().to_bits_le();
     let mut acc = Fs::ZERO;
@@ -162,8 +183,9 @@ pub struct WalletKeys {
 #[derive(Clone, Debug)]
 pub struct SpendingKeys {
     pub sk_master: [u8; 32],
-    /// Spend authorisation secret, an Fr element used only through Poseidon.
-    pub sk_spend: Fr,
+    /// Spend authorisation scalar (Table 1). Its canonical bytes feed sk_nf
+    /// and vk_in; it never multiplies a point.
+    pub sk_spend: Fs,
     pub sk_nf: Fr,
     pub vk_in: Fr,
     pub sk_view: Fs,
@@ -177,7 +199,7 @@ impl WalletKeys {
 
     pub fn derive(&self) -> SpendingKeys {
         let sk_master = hkdf(&self.seed, b"sbp/master");
-        let sk_spend = Fr::from_le_bytes_mod_order(&hkdf(&sk_master, b"sbp/spend"));
+        let sk_spend = scalar_from_bytes(&hkdf(&sk_master, b"sbp/spend"));
         let vk_out = hkdf(&sk_master, b"sbp/out");
         let sk_nf = derive_sk_nf(&sk_spend);
         let vk_in = derive_vk_in(&sk_spend);
@@ -203,11 +225,11 @@ impl WalletKeys {
     }
 }
 
-pub fn derive_sk_nf(sk_spend: &Fr) -> Fr {
-    poseidon::hash(tag::NF_KEY, &[*sk_spend])
+pub fn derive_sk_nf(sk_spend: &Fs) -> Fr {
+    poseidon::hash(tag::NF_KEY, &[scalar_to_field(sk_spend)])
 }
-pub fn derive_vk_in(sk_spend: &Fr) -> Fr {
-    poseidon::hash(tag::VK_IN, &[*sk_spend])
+pub fn derive_vk_in(sk_spend: &Fs) -> Fr {
+    poseidon::hash(tag::VK_IN, &[scalar_to_field(sk_spend)])
 }
 pub fn derive_sk_view(vk_in: &Fr) -> Fs {
     scalar_from_field(&poseidon::hash(tag::SK_VIEW, &[*vk_in]))
@@ -316,5 +338,13 @@ mod tests {
     fn scalar_from_field_keeps_low_bits() {
         let x = Fr::from(12345u64);
         assert_eq!(scalar_from_field(&x), Fs::from(12345u64));
+    }
+
+    #[test]
+    fn scalar_bytes_roundtrip_and_reduce() {
+        let s = scalar_from_bytes(&[0xffu8; 32]);
+        assert_eq!(scalar_from_bytes(&scalar_to_bytes(&s)), s);
+        assert_ne!(scalar_to_bytes(&s), [0xffu8; 32]);
+        assert_eq!(scalar_to_field(&Fs::from(9u64)), Fr::from(9u64));
     }
 }

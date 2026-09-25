@@ -2,7 +2,7 @@
 //! inputs and two outputs. Public inputs: r_anchor and the statement digest.
 
 use crate::{
-    DIV_HASH_TRIES, EdwardsAffine, EdwardsProjective, Fr, N_IN, N_OUT, TREE_DEPTH,
+    DIV_HASH_TRIES, EdwardsAffine, EdwardsProjective, Fr, Fs, N_IN, N_OUT, TREE_DEPTH,
     keys::{self, DiversifyResult, SCALAR_BITS},
     note,
     poseidon::{self, tag},
@@ -49,7 +49,7 @@ pub struct OutputWitness {
 
 #[derive(Clone, Debug)]
 pub struct TransferWitness {
-    pub sk_spend: Fr,
+    pub sk_spend: Fs,
     pub h_body: Fr,
     pub inputs: [InputWitness; N_IN],
     pub outputs: [OutputWitness; N_OUT],
@@ -217,7 +217,9 @@ impl ConstraintSynthesizer<Fr> for TransferCircuit {
         let r_anchor = FpVar::new_input(cs.clone(), || missing(&public).map(|p| p.r_anchor))?;
         let digest = FpVar::new_input(cs.clone(), || missing(&public).map(|p| p.digest))?;
 
-        let sk_spend = FpVar::new_witness(cs.clone(), || missing(&w).map(|w| w.sk_spend))?;
+        let sk_spend = FpVar::new_witness(cs.clone(), || {
+            missing(&w).map(|w| keys::scalar_to_field(&w.sk_spend))
+        })?;
         let h_body = FpVar::new_witness(cs.clone(), || missing(&w).map(|w| w.h_body))?;
 
         // Spend-authority lineage (paper blocks 3 and 4).
@@ -383,7 +385,7 @@ pub fn evaluate(w: &TransferWitness) -> NativeStatement {
 
 /// Recomputes the leaf of an input note the way the circuit does. None when
 /// d has no diversified base.
-pub fn input_leaf(sk_spend: &Fr, inp: &InputWitness) -> Option<Fr> {
+pub fn input_leaf(sk_spend: &Fs, inp: &InputWitness) -> Option<Fr> {
     let der_vk_in = keys::derive_vk_in(sk_spend);
     let sk_view = keys::derive_sk_view(&der_vk_in);
     let g_d = keys::diversify_hash(&inp.d)?.base;
@@ -535,7 +537,7 @@ mod tests {
     #[test]
     fn circuit_rejects_foreign_spend_key() {
         let (mut w, p) = sample_witness();
-        w.sk_spend += Fr::ONE;
+        w.sk_spend += Fs::ONE;
         let cs = ConstraintSystem::<Fr>::new_ref();
         TransferCircuit {
             public: Some(p),
