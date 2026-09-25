@@ -329,17 +329,29 @@ impl Wallet {
         })
     }
 
+    /// Writes a 0600 tmp file, syncs it, renames it over the wallet and
+    /// syncs the directory. Any failure before the rename removes the tmp
+    /// file, so no half-written copy of the seed stays behind.
     pub fn save(&self) -> Result<(), Error> {
+        let bytes = serde_json::to_vec_pretty(&self.file)?;
         let tmp = self.path.with_extension("json.tmp");
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        serde_json::to_writer_pretty(&f, &self.file)?;
-        f.sync_all()?;
-        std::fs::rename(tmp, &self.path)?;
+        let write = || -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &self.path)
+        };
+        if let Err(e) = write() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        let dir = self.path.parent().filter(|d| !d.as_os_str().is_empty());
+        File::open(dir.unwrap_or(Path::new(".")))?.sync_all()?;
         Ok(())
     }
 

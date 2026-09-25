@@ -1117,3 +1117,24 @@ fn zeroize_clears_the_key_bytes_and_keeps_the_records() {
     assert_ne!(vk_out, [0u8; 32]);
     assert_eq!(der.sk_spend, shielded_probe::Fs::from(0u64));
 }
+
+#[test]
+fn a_failed_save_leaves_no_tmp_file_behind() {
+    let dir = std::env::temp_dir().join(format!("sbp-wallet-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = Wallet::create(&dir.join("w.json")).unwrap();
+    let tmp = w.path.with_extension("json.tmp");
+    // A non-empty directory in the wallet's place makes the rename fail.
+    std::fs::remove_file(&w.path).unwrap();
+    std::fs::create_dir_all(w.path.join("x")).unwrap();
+    assert!(w.save().is_err());
+    assert!(!tmp.exists(), "tmp file with the seed left behind");
+    std::fs::remove_dir_all(&w.path).unwrap();
+    w.save().unwrap();
+    assert!(!tmp.exists());
+    assert_eq!(
+        std::fs::metadata(&w.path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
