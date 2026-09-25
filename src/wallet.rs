@@ -102,6 +102,8 @@ pub enum Error {
     NoFundingKey,
     #[error("this wallet has no vault key")]
     NoVaultKey,
+    #[error("note values overflow u64")]
+    Overflow,
 }
 
 /// Deposits above this on bitcoin need an explicit override.
@@ -392,13 +394,12 @@ impl Wallet {
         self.vault.clone().expect("this wallet has no vault key")
     }
 
-    pub fn balance(&self) -> u64 {
+    pub fn balance(&self) -> Result<u64, Error> {
         self.file
             .notes
             .iter()
             .filter(|n| !n.spent && n.locked_by.is_none())
-            .map(|n| n.v)
-            .sum()
+            .try_fold(0u64, |acc, n| acc.checked_add(n.v).ok_or(Error::Overflow))
     }
 
     /// Paper 16.1 and 16.2 against the indexer's accepted history.
@@ -684,7 +685,9 @@ impl Wallet {
         let mut total = 0u64;
         for i in candidates {
             chosen.push(i);
-            total += self.file.notes[i].v;
+            total = total
+                .checked_add(self.file.notes[i].v)
+                .ok_or(Error::Overflow)?;
             if total >= amount || chosen.len() == N_IN {
                 break;
             }

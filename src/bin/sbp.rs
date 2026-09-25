@@ -382,7 +382,7 @@ fn scan(cli: &Cli) -> Result<()> {
     let (st, _) = synced_state(cli, &params)?;
     let mut w = Wallet::open(cli.wallet()?)?;
     let n = w.scan(&st)?;
-    println!("{n} new notes, balance {} sat", w.balance());
+    println!("{n} new notes, balance {} sat", w.balance()?);
     for note in &w.file.notes {
         println!(
             "  pos {:>4}  {:>10} sat  {}{}{}  from {}",
@@ -414,7 +414,7 @@ fn unlock(cli: &Cli, txid: &str, force: bool) -> Result<()> {
     let mut w = Wallet::open(cli.wallet()?)?;
     let mut e = connect(cli, load_deployment(&cli.state)?.network)?;
     let n = w.unlock(&mut e, &txid.parse()?, force)?;
-    println!("unlocked {n} notes, balance {} sat", w.balance());
+    println!("unlocked {n} notes, balance {} sat", w.balance()?);
     Ok(())
 }
 

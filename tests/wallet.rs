@@ -141,11 +141,11 @@ fn scan_dedups_when_cursor_rewinds() {
     let mut st = fresh_state(&op);
     mint_to(&mut st, &alice, 1000, 5, 1);
     alice.scan(&st).unwrap();
-    assert_eq!(alice.balance(), 1000);
+    assert_eq!(alice.balance().unwrap(), 1000);
     alice.file.scanned_events = 0;
     alice.scan(&st).unwrap();
     assert_eq!(alice.file.notes.len(), 1);
-    assert_eq!(alice.balance(), 1000);
+    assert_eq!(alice.balance().unwrap(), 1000);
 }
 
 #[test]
@@ -157,20 +157,20 @@ fn scan_rescans_when_history_changed() {
     mint_to(&mut st, &alice, 1000, 6, 2);
     alice.scan(&st).unwrap();
     assert_eq!(alice.file.scanned_events, 2);
-    assert_eq!(alice.balance(), 2000);
+    assert_eq!(alice.balance().unwrap(), 2000);
     // Reorg: the indexer rebuilt and the second mint is gone.
     let mut st2 = fresh_state(&op);
     mint_to(&mut st2, &alice, 1000, 5, 1);
     alice.scan(&st2).unwrap();
     assert_eq!(alice.file.notes.len(), 1);
-    assert_eq!(alice.balance(), 1000);
+    assert_eq!(alice.balance().unwrap(), 1000);
     assert_eq!(alice.file.scanned_events, 1);
     // Same length, different history.
     let mut st3 = fresh_state(&op);
     mint_to(&mut st3, &alice, 700, 8, 3);
     alice.scan(&st3).unwrap();
     assert_eq!(alice.file.notes.len(), 1);
-    assert_eq!(alice.balance(), 700);
+    assert_eq!(alice.balance().unwrap(), 700);
     // Wallet that scanned four events meets an empty rebuild.
     let mut w = Wallet::create(&tmp("w2")).unwrap();
     w.file.scanned_events = 4;
@@ -188,7 +188,7 @@ fn scan_drops_and_rediscovers_a_stale_note() {
     alice.file.notes[0].v = 999;
     alice.scan(&st).unwrap();
     assert_eq!(alice.file.notes.len(), 1);
-    assert_eq!(alice.balance(), 1000);
+    assert_eq!(alice.balance().unwrap(), 1000);
 }
 
 #[test]
@@ -202,11 +202,11 @@ fn scan_releases_a_lock_after_the_anchor_window() {
     alice.file.notes[0].lock_anchor = Some(st.replayed_height);
     st.replayed_height += WINDOW_W;
     alice.scan(&st).unwrap();
-    assert_eq!(alice.balance(), 0, "still inside the window");
+    assert_eq!(alice.balance().unwrap(), 0, "still inside the window");
     st.replayed_height += 1;
     alice.scan(&st).unwrap();
     assert!(alice.file.notes[0].locked_by.is_none());
-    assert_eq!(alice.balance(), 1000);
+    assert_eq!(alice.balance().unwrap(), 1000);
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn unlock_releases_a_lock_without_anchor() {
     alice.file.notes[0].locked_by = Some(carrier);
     st.replayed_height += 500;
     alice.scan(&st).unwrap();
-    assert_eq!(alice.balance(), 0);
+    assert_eq!(alice.balance().unwrap(), 0);
     let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
     assert_eq!(
         alice
@@ -229,7 +229,7 @@ fn unlock_releases_a_lock_without_anchor() {
         0
     );
     assert_eq!(alice.unlock(&mut e, &carrier, false).unwrap(), 1);
-    assert_eq!(alice.balance(), 1000);
+    assert_eq!(alice.balance().unwrap(), 1000);
 }
 
 #[test]
@@ -242,11 +242,11 @@ fn unlock_refuses_while_the_carrier_is_known_to_the_chain() {
     let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
     let mined = e.block_txids(100).unwrap()[0];
     alice.file.notes[0].locked_by = Some(mined);
-    assert_eq!(alice.balance(), 0);
+    assert_eq!(alice.balance().unwrap(), 0);
     assert!(alice.unlock(&mut e, &mined, false).is_err());
-    assert_eq!(alice.balance(), 0);
+    assert_eq!(alice.balance().unwrap(), 0);
     assert_eq!(alice.unlock(&mut e, &mined, true).unwrap(), 1);
-    assert_eq!(alice.balance(), 1000);
+    assert_eq!(alice.balance().unwrap(), 1000);
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn scan_records_own_spend_as_sent() {
     );
     alice.scan(&st).unwrap();
     assert!(alice.file.notes[0].spent);
-    assert_eq!(alice.balance(), 400);
+    assert_eq!(alice.balance().unwrap(), 400);
     assert_eq!(alice.file.sent.len(), 2);
     assert_eq!(
         (
@@ -325,7 +325,7 @@ fn scan_records_burned_output_as_spent() {
     );
     assert_eq!(op.scan(&st).unwrap(), 1);
     assert!(op.file.notes[0].spent);
-    assert_eq!(op.balance(), 0);
+    assert_eq!(op.balance().unwrap(), 0);
     // Without a payout the same output is ordinary income.
     transfer(
         &mut st,
@@ -336,7 +336,7 @@ fn scan_records_burned_output_as_spent() {
         4,
     );
     op.scan(&st).unwrap();
-    assert_eq!(op.balance(), 1000);
+    assert_eq!(op.balance().unwrap(), 1000);
 }
 
 #[test]
@@ -427,7 +427,7 @@ fn a_viewing_only_file_scans_but_cannot_fund_and_exports_its_viewing_keys() {
     let mut st = fresh_state(&op);
     mint_to(&mut st, &v, 1000, 5, 1);
     assert_eq!(v.scan(&st).unwrap(), 1);
-    assert_eq!(v.balance(), 1000);
+    assert_eq!(v.balance().unwrap(), 1000);
     let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
     assert_eq!(
         v.mint(&mut e, &st.deployment, 1)
@@ -647,7 +647,7 @@ fn process_payouts_refuses_bad_requests_and_keeps_going() {
     );
     op.file.paid_payouts.push(old.to_string());
     op.scan(&st).unwrap();
-    assert_eq!(op.balance(), 0);
+    assert_eq!(op.balance().unwrap(), 0);
     let mut e = Electrum::connect(DEFAULT_ELECTRUM).unwrap();
     let done = op.process_payouts(&mut e, &st, None).unwrap();
     assert!(done.is_empty());
@@ -739,7 +739,7 @@ fn burn_marking_spares_non_operator_recipients() {
     );
     assert_eq!(alice.scan(&st).unwrap(), 2);
     assert!(!alice.file.notes[0].spent);
-    assert_eq!(alice.balance(), 2000);
+    assert_eq!(alice.balance().unwrap(), 2000);
 }
 
 #[test]
@@ -913,10 +913,10 @@ fn built_transfer_is_accepted_by_replay_and_scanned_by_both_wallets() {
         Err(RejectReason::NullifierSpent(built.envelope.nf[0]))
     );
     assert_eq!(bob.scan(&st).unwrap(), 1);
-    assert_eq!(bob.balance(), 600);
+    assert_eq!(bob.balance().unwrap(), 600);
     assert_eq!(alice.scan(&st).unwrap(), 1);
     assert!(alice.file.notes[0].spent);
-    assert_eq!(alice.balance(), 400);
+    assert_eq!(alice.balance().unwrap(), 400);
     assert_eq!(alice.file.sent.len(), 2);
     assert_eq!(alice.file.sent[0].to, bob.address().to_string());
     // Bob spends the received note two blocks later, with a payout request.
@@ -1137,4 +1137,29 @@ fn a_failed_save_leaves_no_tmp_file_behind() {
         std::fs::metadata(&w.path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+}
+
+#[test]
+fn balance_and_note_selection_refuse_to_overflow() {
+    let op = Wallet::create(&tmp("op20")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice20")).unwrap();
+    let mut st = fresh_state(&op);
+    close_block(&mut st, 10);
+    mint_to(&mut st, &alice, u64::MAX - 1, 5, 1);
+    mint_to(&mut st, &alice, 5, 6, 2);
+    close_block(&mut st, 11);
+    close_block(&mut st, 12);
+    alice.scan(&st).unwrap();
+    assert_eq!(
+        alice.balance().err().map(|e| e.to_string()),
+        Some("note values overflow u64".into())
+    );
+    assert!(matches!(
+        alice
+            .build_transfer(&st, params(), &op.address(), u64::MAX, None)
+            .err(),
+        Some(shielded_probe::wallet::Error::Overflow)
+    ));
+    alice.file.notes[1].spent = true;
+    assert_eq!(alice.balance().unwrap(), u64::MAX - 1);
 }

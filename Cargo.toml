@@ -11,6 +11,9 @@ keywords = ["bitcoin", "zero-knowledge", "groth16", "privacy", "signet"]
 categories = ["cryptography"]
 publish = false
 
+[profile.release]
+overflow-checks = true
+
 [dependencies]
 anyhow = "1.0.104"
 ark-bls12-381 = "0.5"
