@@ -217,8 +217,8 @@ fn unlock_releases_a_lock_without_anchor() {
 
 #[test]
 fn unlock_refuses_while_the_carrier_is_known_to_the_chain() {
-    let op = Wallet::create(&tmp("op14")).unwrap();
-    let mut alice = Wallet::create(&tmp("alice14")).unwrap();
+    let op = Wallet::create(&tmp("op15")).unwrap();
+    let mut alice = Wallet::create(&tmp("alice15")).unwrap();
     let mut st = fresh_state(&op);
     mint_to(&mut st, &alice, 1000, 5, 1);
     alice.scan(&st).unwrap();
