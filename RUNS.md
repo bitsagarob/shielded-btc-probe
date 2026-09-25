@@ -69,7 +69,7 @@ mempool.space.
 | Mint 10,000 to bob | 968530 | `1a467ebf7ae1cbea3612ba84676ded33ad2be65e1d9f725687deda91902708e5` |
 | alice pays bob 5,000 shielded, 669-byte envelope, 793 vB, fee 2,382 sat | 968533 | `5c3a5857e9fe9aa98ccb18e52b1a229fcac542caf4e46b499de8efd4bdec3751` |
 | bob redeems 12,000 spending two notes, 699-byte envelope, 892 vB, fee 2,676 sat | 968537 | `515a51d7c197d52c10a772dbd23fa401177d4d52ab758819963c33afed78fa49` |
-| operator pays 11,448 (12,000 minus the 552 sat fee) with `payouts --only` | mempool at time of writing | `2e21f3f9c1241f02abf62cd1e0cf4cfeb14b8c39b3c09bfb659a6cf733faa1d4` |
+| operator pays 11,448 (12,000 minus the 552 sat fee) with `payouts --only` | 968538 | `2e21f3f9c1241f02abf62cd1e0cf4cfeb14b8c39b3c09bfb659a6cf733faa1d4` |
 
 Wallets under the K_WALLET = 2 policy waited two blocks after each note before
 spending it. The 669-byte OP_RETURN was relayed by mempool.space.
