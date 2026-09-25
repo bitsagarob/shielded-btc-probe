@@ -73,6 +73,42 @@ cargo build --release
 `params/` holds the Groth16 keys (56 MB, generated on first use from a fixed
 seed). `state/` holds wallets and the indexer state. Both are ignored by git.
 
+On a bitcoin deployment two commands change: `mint` refuses an amount over
+100,000 sat unless `--i-know` is passed, and `payouts` runs only with
+`--only <txid>`, once per request the operator has verified.
+
+## Replay it yourself
+
+Anyone can rebuild the accepted history from the deployment profile and any
+Electrum server; no key of the operator is needed.
+
+```
+cargo build --release
+./target/release/sbp deploy --activation <height> --network <signet|bitcoin> --fee-rate <sat/vB> --operator-wallet <wallet>
+./target/release/sbp sync --electrum <host:port>
+./target/release/sbp status
+```
+
+`deploy` writes `state/deployment.json`: network, fee rate, activation
+height, the vault scriptPubKey, the operator's shielded address and the
+fingerprint of the verifying key. That file is the whole profile and holds no
+secret. `deploy` derives the vault and the operator address from the operator
+wallet, so an outsider does not run it: copy the published `deployment.json`
+into `state/` and start at `sync`. The profile of a public run is committed
+to this repository next to the table it produced.
+
+`sync` replays every block from activation over Electrum's
+`transaction.id_from_pos`, verifies every envelope against the Groth16
+verifying key regenerated from the fixed seed (refusing a `params/` whose
+fingerprint differs from the profile) and writes `state/state.json`.
+`status` prints the accepted events and the rejections. Two replays of the
+same profile against different servers must print the same list.
+
+The client speaks the Electrum protocol over plain TCP only. `--electrum`
+defaults to `127.0.0.1:50001` for signet and `127.0.0.1:50011` for bitcoin. A
+server that only offers TLS needs a local stunnel (or any TLS-terminating
+proxy) in front of it, with `--electrum` pointed at the plain port.
+
 ## Layout
 
 | File | Paper section |
