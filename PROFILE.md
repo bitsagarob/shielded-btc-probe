@@ -137,6 +137,14 @@ The instantiations the paper leaves open, in one place:
   does not exceed it, refuses dust and non-standard scripts, pays from a
   separate vault key minus the payout fee, and tags the payout with the
   request's first nullifier so a restored operator wallet does not pay twice.
+- **Why the peg is not a PIPE.** The paper's intended boundary is
+  [Bitcoin PIPEs v2](https://eprint.iacr.org/2026/186): a signing key
+  witness-encrypted under "a valid exit proof exists". Its only candidate
+  construction is heuristic, unimplemented, and estimated at 338 TB of
+  ciphertext per SNARK verification (its sections 5.3.1 and 5.4), and the key
+  is released once, so it would need one output per deposit, exact-amount
+  exits, and a witness with a receiver secret so the public proof cannot be
+  front-run. The operator key stands in for all of that.
 - **Carrier rules beyond A.4.** Two OP_RETURN outputs, extra pushes or a
   non-minimal push whose payload starts with the magic are recorded as
   rejections rather than skipped, so probing them leaves a trace.
