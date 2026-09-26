@@ -55,6 +55,8 @@ pub enum Error {
     Shape(&'static str),
     #[error("insufficient funds: have {have} sat, need {need} sat")]
     InsufficientFunds { have: u64, need: u64 },
+    #[error("output of {amount} sat cannot cover fee {fee} sat and dust")]
+    OutputBelowFee { amount: u64, fee: u64 },
     #[error("fee did not converge")]
     FeeDidNotConverge,
     #[error("wrong chain: genesis block is {got}, expected {expected}")]
@@ -279,6 +281,11 @@ pub fn scripthash(spk: &ScriptBuf) -> String {
     hex::encode(h)
 }
 
+enum CarrierOutputs {
+    Fixed(Vec<TxOut>),
+    Payout(TxOut),
+}
+
 /// A single P2WPKH key that pays for carrier transactions (and, for the
 /// operator, holds the vault).
 #[derive(Clone)]
@@ -313,6 +320,41 @@ impl FundingKey {
         extra: Vec<TxOut>,
         fee_rate_sat_vb: u64,
     ) -> Result<(Transaction, u64), Error> {
+        self.build_carrier_with_fee(
+            utxos,
+            payload,
+            CarrierOutputs::Fixed(extra),
+            fee_rate_sat_vb,
+        )
+    }
+
+    /// Deducts the fee from one payout, preserving the rest of the vault.
+    pub(crate) fn build_payout_carrier(
+        &self,
+        utxos: &[Utxo],
+        payload: &[u8],
+        payout: TxOut,
+        fee_rate_sat_vb: u64,
+    ) -> Result<(Transaction, u64), Error> {
+        self.build_carrier_with_fee(
+            utxos,
+            payload,
+            CarrierOutputs::Payout(payout),
+            fee_rate_sat_vb,
+        )
+    }
+
+    fn build_carrier_with_fee(
+        &self,
+        utxos: &[Utxo],
+        payload: &[u8],
+        outputs: CarrierOutputs,
+        fee_rate_sat_vb: u64,
+    ) -> Result<(Transaction, u64), Error> {
+        let (extra, deduct_fee) = match outputs {
+            CarrierOutputs::Fixed(extra) => (extra, false),
+            CarrierOutputs::Payout(payout) => (vec![payout], true),
+        };
         let spk = self.script_pubkey();
         let extra_total = extra
             .iter()
@@ -327,12 +369,14 @@ impl FundingKey {
         for _ in 0..6 {
             let mut selected = Vec::new();
             let mut total = 0u64;
-            let need = extra_total.checked_add(fee).ok_or(Error::Overflow)?;
+            let need = extra_total
+                .checked_add(if deduct_fee { 0 } else { fee })
+                .ok_or(Error::Overflow)?;
             let target = need.checked_add(546).ok_or(Error::Overflow)?;
             for u in utxos {
                 selected.push(u.clone());
                 total = total.checked_add(u.value).ok_or(Error::Overflow)?;
-                if total >= target {
+                if total >= target || (deduct_fee && total == need) {
                     break;
                 }
             }
@@ -340,9 +384,17 @@ impl FundingKey {
                 return Err(Error::InsufficientFunds { have: total, need });
             }
             let mut outputs = extra.clone();
+            if deduct_fee {
+                let amount = outputs[0].value.to_sat();
+                let net = amount
+                    .checked_sub(fee)
+                    .filter(|&v| v >= 546)
+                    .ok_or(Error::OutputBelowFee { amount, fee })?;
+                outputs[0].value = Amount::from_sat(net);
+            }
             outputs.push(op_return.clone());
-            let change = total - extra_total - fee;
-            let mut paid = total - extra_total;
+            let change = total - need;
+            let mut paid = fee.checked_add(change).ok_or(Error::Overflow)?;
             if change >= 546 {
                 outputs.push(TxOut {
                     value: Amount::from_sat(change),
@@ -369,6 +421,14 @@ impl FundingKey {
                 .checked_mul(fee_rate_sat_vb)
                 .ok_or(Error::Overflow)?;
             if fee >= want {
+                // Size the payout first so an unpayable request is refused.
+                // Other notes' backing must not become a dust fee.
+                if deduct_fee && change > 0 && change < 546 {
+                    return Err(Error::InsufficientFunds {
+                        have: total,
+                        need: target,
+                    });
+                }
                 return Ok((tx, paid));
             }
             fee = want;
@@ -483,5 +543,39 @@ mod tests {
         assert_eq!(fee, 100_000 - tx.output[1].value.to_sat());
 
         log::info!("carrier vsize {} vB for a 700 byte envelope", tx.vsize());
+    }
+
+    #[test]
+    fn fixed_carrier_outputs_retain_their_value_with_fees_paid_from_funding() {
+        let k = FundingKey::from_bytes(&[9u8; 32]).unwrap();
+        let recipient = TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: FundingKey::from_bytes(&[10u8; 32]).unwrap().script_pubkey(),
+        };
+        let mut utxos = vec![Utxo {
+            outpoint: OutPoint::new(Txid::all_zeros(), 0),
+            value: 100_000,
+            height: 1,
+        }];
+        let payload = vec![7u8; 700];
+        let (tx, fee) = k
+            .build_carrier(&utxos, &payload, vec![recipient.clone()], 2)
+            .unwrap();
+        assert_eq!(tx.input.len(), 1);
+        assert_eq!(tx.input[0].previous_output, utxos[0].outpoint);
+        assert_eq!(tx.output.len(), 3);
+        assert_eq!(tx.output[0], recipient);
+        assert_eq!(op_return_payload(&tx), Ok(Some(payload.clone())));
+        assert_eq!(tx.output[2].script_pubkey, k.script_pubkey());
+        assert_eq!(tx.output[2].value.to_sat(), 90_000 - fee);
+        let output_total: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
+        assert_eq!(fee, utxos[0].value - output_total);
+        assert!(fee >= tx.vsize() as u64 * 2);
+
+        utxos[0].value = 10_000;
+        assert!(matches!(
+            k.build_carrier(&utxos, &payload, vec![recipient], 2),
+            Err(Error::InsufficientFunds { .. })
+        ));
     }
 }
