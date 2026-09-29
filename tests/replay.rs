@@ -11,7 +11,7 @@ use shielded_btc_probe::{
     envelope::{CT_OUT_LEN, Envelope, MAGIC, MintEnvelope, PROOF_LEN, Payout, TransferEnvelope},
     indexer::{Deployment, Event, MAX_REJECTIONS, RejectReason, Rejection, State},
     keys::{self, WalletKeys},
-    note::{NotePlaintext, encrypt},
+    note::{self, NotePlaintext, encrypt},
     prover::Params,
     wallet::Wallet,
 };
@@ -331,6 +331,140 @@ fn mint_to(w: &Wallet, sats: u64, seed: u64) -> Transaction {
         r_seed: Fr::from(seed),
     };
     tx(vec![pay_vault(sats), push(&m.to_bytes())])
+}
+
+#[test]
+fn replay_tx_rejects_invalid_proofs_and_conflicts_without_mutating_state() {
+    let dir = scratch("atomic-rejection");
+    let mut alice = Wallet::create(&dir.join("alice.json")).unwrap();
+    let bob = Wallet::create(&dir.join("bob.json")).unwrap();
+    let mut chain = MockChain::new(999);
+    let mut st = State::fresh(dep());
+    chain.mine(vec![mint_to(&alice, 1000, 5)]);
+    chain.mine(vec![]);
+    assert_eq!(st.sync(&mut chain, params()).unwrap(), 2);
+    alice.scan(&st).unwrap();
+    let valid = alice
+        .build_transfer(&st, params(), &bob.address(), 600, None)
+        .unwrap()
+        .envelope;
+
+    // A larger, later mint makes the conflicting spend select a fresh input
+    // first and the original note second. Both anchors remain admissible.
+    chain.mine(vec![mint_to(&alice, 2000, 6)]);
+    chain.mine(vec![]);
+    assert_eq!(st.sync(&mut chain, params()).unwrap(), 2);
+    alice.scan(&st).unwrap();
+    let conflicting = alice
+        .build_transfer(&st, params(), &bob.address(), 2500, None)
+        .unwrap()
+        .envelope;
+    assert_eq!(valid.h_anchor, 1000);
+    assert_eq!(conflicting.h_anchor, 1002);
+    assert_eq!(conflicting.nf[1], valid.nf[0]);
+    assert!(!valid.nf.contains(&conflicting.nf[0]));
+    assert_ne!(valid.body_bytes(), conflicting.body_bytes());
+
+    // Owned bytes capture every persisted field, including ordered leaves,
+    // events, nullifiers and retained roots; also check the live tree root.
+    let checkpoint = dir.join("state.json");
+    let snapshot = |state: &State| {
+        state.save(&checkpoint).unwrap();
+        (state.tree.root(), std::fs::read(&checkpoint).unwrap())
+    };
+    let before = snapshot(&st);
+    let conflicting_tx = tx(vec![push(&conflicting.to_bytes())]);
+    let mut independent = State::load(&checkpoint).unwrap();
+    independent
+        .replay_tx(
+            params(),
+            1004,
+            conflicting_tx.compute_txid(),
+            &conflicting_tx,
+            &vault(),
+        )
+        .unwrap();
+
+    // This proof just verified for a different body, so its encoding is
+    // valid. Keep the original body intact to reach cryptographic rejection.
+    let mut invalid = valid.clone();
+    invalid.proof.clone_from(&conflicting.proof);
+    assert_eq!(invalid.body_bytes(), valid.body_bytes());
+    let invalid_bytes = invalid.to_bytes();
+    assert_eq!(
+        Envelope::parse(&invalid_bytes).unwrap(),
+        Some(Envelope::Transfer(Box::new(invalid)))
+    );
+    let invalid_tx = tx(vec![push(&invalid_bytes)]);
+    assert_eq!(
+        st.replay_tx(
+            params(),
+            1004,
+            invalid_tx.compute_txid(),
+            &invalid_tx,
+            &vault()
+        ),
+        Err(RejectReason::ProofInvalid)
+    );
+    assert_eq!(snapshot(&st), before, "invalid proof changed replay state");
+
+    // The rejected attempt must not prevent the original transfer from
+    // succeeding, nor consume output positions or nullifiers.
+    let old_leaves = st.tree.leaves();
+    let old_roots = st.roots.clone();
+    let old_counts = st.leaf_counts.clone();
+    let old_hashes = st.block_hashes.clone();
+    let old_events = serde_json::to_value(&st.events).unwrap();
+    let valid_bytes = valid.to_bytes();
+    let valid_tx = tx(vec![push(&valid_bytes)]);
+    let valid_txid = valid_tx.compute_txid();
+    st.replay_tx(params(), 1004, valid_txid, &valid_tx, &vault())
+        .unwrap();
+    let mut expected_leaves = old_leaves;
+    for j in 0..2 {
+        expected_leaves.push(note::leaf(
+            &valid.h_body(),
+            j as u8,
+            &valid.pk_eph[j],
+            &valid.ct[j],
+        ));
+    }
+    assert_eq!(st.tree.leaves(), expected_leaves);
+    assert_eq!(st.tree.len(), 4);
+    assert_ne!(st.tree.root(), before.0);
+    assert_eq!(st.nullifiers, valid.nf.into_iter().collect());
+    assert_eq!(st.events.len(), 3);
+    assert_eq!(serde_json::to_value(&st.events[..2]).unwrap(), old_events);
+    let Event::Transfer(accepted) = &st.events[2] else {
+        panic!("missing accepted transfer");
+    };
+    assert_eq!(accepted.txid, valid_txid);
+    assert_eq!(accepted.height, 1004);
+    assert_eq!(accepted.bytes, valid_bytes);
+    assert_eq!(accepted.positions, [2, 3]);
+    // replay_tx is the per-envelope boundary; sync finalizes the block later.
+    assert_eq!(st.roots, old_roots);
+    assert_eq!(st.leaf_counts, old_counts);
+    assert_eq!(st.block_hashes, old_hashes);
+    assert_eq!(st.replayed_height, 1003);
+    assert!(st.rejections.is_empty());
+
+    let after_valid = snapshot(&st);
+    assert_eq!(
+        st.replay_tx(
+            params(),
+            1004,
+            conflicting_tx.compute_txid(),
+            &conflicting_tx,
+            &vault(),
+        ),
+        Err(RejectReason::NullifierSpent(conflicting.nf[1]))
+    );
+    assert_eq!(
+        snapshot(&st),
+        after_valid,
+        "conflicting spend changed replay state"
+    );
 }
 
 /// Three blocks: a mint, a transfer spending it, an empty one. Block 2 is
