@@ -949,25 +949,18 @@ impl Wallet {
         let vault = self.vault_key()?;
         let mut utxos = client.listunspent(&vault.script_pubkey())?;
         utxos.sort_by_key(|u| Reverse(u.value));
-        let out = |v: u64| {
-            vec![TxOut {
-                value: Amount::from_sat(v),
-                script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()),
-            }]
+        let out = TxOut {
+            value: Amount::from_sat(p.amount),
+            script_pubkey: ScriptBuf::from_bytes(p.script_pubkey.clone()),
         };
-        let fee = (vault
-            .build_carrier(&utxos, nf, out(p.amount), fee_rate_sat_vb)?
-            .0
-            .vsize() as u64)
-            .checked_mul(fee_rate_sat_vb)
-            .ok_or(Error::Overflow)?;
-        if p.amount < fee.checked_add(546).ok_or(Error::Overflow)? {
-            return Err(Error::PayoutBelowFee {
-                amount: p.amount,
-                fee,
-            });
-        }
-        Ok(vault.build_carrier(&utxos, nf, out(p.amount - fee), fee_rate_sat_vb)?)
+        vault
+            .build_payout_carrier(&utxos, nf, out, fee_rate_sat_vb)
+            .map_err(|err| match err {
+                chain::Error::OutputBelowFee { amount, fee } => {
+                    Error::PayoutBelowFee { amount, fee }
+                }
+                err => Error::Chain(err),
+            })
     }
 
     fn fail_payout(&mut self, txid: &Txid, key: String, err: Error) -> Result<(), Error> {

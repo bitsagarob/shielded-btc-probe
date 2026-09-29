@@ -979,6 +979,190 @@ fn built_transfer_is_accepted_by_replay_and_scanned_by_both_wallets() {
     assert_eq!(st.tree.len(), 5);
 }
 
+fn funded_payout(
+    name: &str,
+    amount: u64,
+    values: &[u64],
+) -> (Wallet, State, MockChain, Txid, ScriptBuf) {
+    let op = Wallet::create(&tmp(&format!("op-payout-{name}"))).unwrap();
+    let alice = Wallet::create(&tmp(&format!("alice-payout-{name}"))).unwrap();
+    let mut st = fresh_state(&op);
+    let vault = op.vault_key().unwrap().script_pubkey();
+    let spk = alice.funding_key().unwrap().script_pubkey();
+    let req = transfer(
+        &mut st,
+        [(&op.address(), amount, 1), (&alice.address(), 0, 2)],
+        None,
+        [Fr::from(1u64), Fr::from(2u64)],
+        Some(Payout {
+            amount,
+            script_pubkey: spk.to_bytes(),
+        }),
+        7,
+    );
+    let funded = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![],
+        output: values
+            .iter()
+            .map(|&value| TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey: vault.clone(),
+            })
+            .collect(),
+    };
+    let mut chain = MockChain::new(99);
+    chain.mine(vec![funded]);
+    (op, st, chain, req, spk)
+}
+
+#[test]
+fn payout_deducts_fees_from_the_request_with_exact_and_surplus_funding() {
+    for (case, (values, rate)) in [
+        (vec![100_000], 2),
+        (vec![10_000], 2),
+        (vec![6_000, 4_000], 2),
+        (vec![6_000, 5_000], 2),
+        (vec![10_000, 5_000], 2),
+        (vec![10_546], 2),
+        (vec![10_000], 0),
+        (vec![10_000], 20),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (mut op, mut st, mut chain, req, spk) =
+            funded_payout(&format!("funded-{case}"), 10_000, &values);
+        st.deployment.fee_rate_sat_vb = rate;
+        let vault = op.vault_key().unwrap().script_pubkey();
+        let done = op.process_payouts(&mut chain, &st, Some(req)).unwrap();
+        assert_eq!(
+            done.len(),
+            1,
+            "funded redemption deferred for vault {values:?}"
+        );
+        let (_, paid, fee, payout_txid) = done[0];
+        assert_eq!(paid + fee, 10_000);
+        assert_eq!(chain.mempool.len(), 1);
+        let tx = chain.mempool[0].clone();
+        assert_eq!(tx.compute_txid(), payout_txid);
+        assert_eq!(tx.output[0].script_pubkey, spk);
+        assert_eq!(tx.output[0].value.to_sat(), paid);
+        assert!(fee >= tx.vsize() as u64 * rate);
+        let remaining: u64 = chain
+            .listunspent(&vault)
+            .unwrap()
+            .iter()
+            .map(|u| u.value)
+            .sum();
+        assert_eq!(remaining, values.iter().sum::<u64>() - 10_000);
+        let actual_fee = tx
+            .input
+            .iter()
+            .map(|input| {
+                chain
+                    .transaction(&input.previous_output.txid)
+                    .unwrap()
+                    .output[input.previous_output.vout as usize]
+                    .value
+                    .to_sat()
+            })
+            .sum::<u64>()
+            - tx.output.iter().map(|out| out.value.to_sat()).sum::<u64>();
+        assert_eq!(fee, actual_fee);
+        assert!(op.file.failed_payouts.is_empty());
+        assert_eq!(op.file.payout_txids, vec![payout_txid]);
+        assert!(
+            op.process_payouts(&mut chain, &st, Some(req))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(chain.mempool.len(), 1);
+    }
+}
+
+#[test]
+fn payout_defers_insufficient_funds_and_dust_change_without_losing_the_request() {
+    for available in [9_999, 10_001, 10_545] {
+        let (mut op, st, mut chain, req, _) =
+            funded_payout(&format!("deferred-{available}"), 10_000, &[available]);
+        let vault = op.vault_key().unwrap().script_pubkey();
+        assert!(
+            op.process_payouts(&mut chain, &st, Some(req))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(chain.mempool.is_empty());
+        assert!(op.file.paid_payouts.is_empty());
+        assert!(op.file.failed_payouts.is_empty());
+        assert_eq!(
+            chain
+                .listunspent(&vault)
+                .unwrap()
+                .iter()
+                .map(|u| u.value)
+                .sum::<u64>(),
+            available
+        );
+        chain.mine(vec![Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: vault.clone(),
+            }],
+        }]);
+        let done = op.process_payouts(&mut chain, &st, Some(req)).unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].1 + done[0].2, 10_000);
+        assert_eq!(
+            chain
+                .listunspent(&vault)
+                .unwrap()
+                .iter()
+                .map(|u| u.value)
+                .sum::<u64>(),
+            available + 1_000 - 10_000
+        );
+    }
+}
+
+#[test]
+fn payout_refuses_a_request_that_cannot_cover_its_fee_and_dust() {
+    for available in [600, 1_000, 601, 100_000] {
+        let (mut op, st, mut chain, req, _) =
+            funded_payout(&format!("below-fee-{available}"), 600, &[available]);
+        let vault = op.vault_key().unwrap().script_pubkey();
+        assert!(
+            op.process_payouts(&mut chain, &st, Some(req))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(chain.mempool.is_empty());
+        assert!(op.file.paid_payouts.is_empty());
+        assert!(op.file.payout_txids.is_empty());
+        assert_eq!(
+            chain
+                .listunspent(&vault)
+                .unwrap()
+                .iter()
+                .map(|u| u.value)
+                .sum::<u64>(),
+            available
+        );
+        let key = hex::encode(shielded_btc_probe::keys::fr_to_bytes(&Fr::from(1u64)));
+        assert!(
+            op.file
+                .failed_payouts
+                .get(&key)
+                .is_some_and(|reason| reason.contains("fee plus dust")),
+            "unpayable request was not refused with {available} sat in the vault"
+        );
+    }
+}
+
 #[test]
 fn a_lost_broadcast_reply_does_not_pay_the_same_request_twice() {
     let mut op = Wallet::create(&tmp("op17")).unwrap();
